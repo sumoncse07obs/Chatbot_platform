@@ -11,6 +11,13 @@ class ResourceCreateRequest(BaseModel):
     is_active: bool = True
 
 
+class ResourceUrlCreateRequest(BaseModel):
+    title: str
+    url: str
+    resource_type: str = "website"
+    is_active: bool = True
+
+
 class ResourceUpdateRequest(BaseModel):
     title: Optional[str] = None
     resource_type: Optional[str] = None

@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
-import ResourcesList from '@/components/admin/module/resources/resourceslist';
+import ResourcesList from './resourceslist';
 
 export default function AdminResourceRoutes() {
   return (

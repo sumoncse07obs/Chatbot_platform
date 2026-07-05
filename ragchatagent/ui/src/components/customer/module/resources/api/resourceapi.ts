@@ -24,6 +24,13 @@ export interface CreateTextResourcePayload {
   is_active: boolean;
 }
 
+export interface CreateUrlResourcePayload {
+  title: string;
+  url: string;
+  resource_type: string;
+  is_active: boolean;
+}
+
 export interface UpdateResourcePayload {
   title?: string;
   resource_type?: string;
@@ -51,6 +58,13 @@ export function getResources() {
 
 export function createTextResource(payload: CreateTextResourcePayload) {
   return apiRequest<ResourceItem>('/resources', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createUrlResource(payload: CreateUrlResourcePayload) {
+  return apiRequest<ResourceItem>('/resources/url', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

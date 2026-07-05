@@ -4,3 +4,5 @@ protected/runtime/*
 !protected/runtime/.gitignore
 protected/data/*.db
 themes/classic/views/
+ragchatagent/api/storage/resources/9e818a3bbfd54ba891d0c3b7fe21cb43.pdf
+ragchatagent/api/instruction.txt

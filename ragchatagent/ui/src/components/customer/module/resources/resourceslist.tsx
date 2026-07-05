@@ -1,7 +1,8 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
-import { FileText, Plus, RefreshCw, Search, Trash2, Upload, Wand2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, Plus, RefreshCw, Search, Trash2, Upload, Wand2 } from 'lucide-react';
 import {
   createTextResource,
+  createUrlResource,
   deindexResource,
   deleteResource,
   getResources,
@@ -10,7 +11,7 @@ import {
   ResourceItem,
   updateResource,
   uploadResourceFile,
-} from '@/components/admin/module/resources/api/resourceapi';
+} from './api/resourceapi';
 import { useToast } from '@/components/shared/toast/ToastProvider';
 
 const buttonClass =
@@ -19,12 +20,15 @@ const buttonClass =
 const darkButtonClass =
   'inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-slate-950 bg-slate-950 px-4 text-sm font-extrabold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60';
 
-type CreateMode = 'text' | 'file';
+type CreateMode = 'text' | 'file' | 'url';
+
+const PAGE_SIZE = 10;
 
 const emptyForm = {
   title: '',
   resource_type: 'text',
   content: '',
+  url: '',
   is_active: true,
 };
 
@@ -42,6 +46,7 @@ export default function ResourcesList() {
   const [selected, setSelected] = useState<ResourceItem | null>(null);
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -73,6 +78,24 @@ export default function ResourcesList() {
       return matchesSearch && matchesType;
     });
   }, [items, query, typeFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE));
+
+  const paginatedItems = useMemo(() => {
+    const startIndex = (currentPage - 1) * PAGE_SIZE;
+    return filteredItems.slice(startIndex, startIndex + PAGE_SIZE);
+  }, [filteredItems, currentPage]);
+
+  const paginationStart = filteredItems.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const paginationEnd = Math.min(currentPage * PAGE_SIZE, filteredItems.length);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [query, typeFilter]);
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(page, totalPages));
+  }, [totalPages]);
 
   const totals = useMemo(
     () => ({
@@ -143,14 +166,30 @@ export default function ResourcesList() {
       return;
     }
 
+    if (createMode === 'url' && !form.url.trim()) {
+      toast.error('Please enter a website URL.');
+      return;
+    }
+
     try {
       setSaving(true);
 
       const created =
         createMode === 'text'
-          ? await createTextResource(form)
-          : await uploadResourceFile(form.title, form.resource_type || 'document', file as File);
-
+          ? await createTextResource({
+              title: form.title,
+              resource_type: form.resource_type || 'text',
+              content: form.content,
+              is_active: form.is_active,
+            })
+          : createMode === 'url'
+            ? await createUrlResource({
+                title: form.title,
+                url: form.url,
+                resource_type: form.resource_type || 'website',
+                is_active: form.is_active,
+              })
+            : await uploadResourceFile(form.title, form.resource_type || 'document', file as File);
       setItems((current) => [created, ...current]);
       setSelected(created);
       setShowCreateModal(false);
@@ -298,110 +337,141 @@ export default function ResourcesList() {
             <option value="pdf">PDF</option>
           </select>
         </div>
-
         {loading ? (
           <div className="py-10 text-center text-slate-500">Loading resources...</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
-                  <th className="p-4">Title</th>
-                  <th className="p-4">Type</th>
-                  <th className="p-4">Active</th>
-                  <th className="p-4">Indexed</th>
-                  <th className="p-4 text-right">Actions</th>
-                </tr>
-              </thead>
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
+                    <th className="p-4">Title</th>
+                    <th className="p-4">Type</th>
+                    <th className="p-4">Active</th>
+                    <th className="p-4">Indexed</th>
+                    <th className="p-4 text-right">Actions</th>
+                  </tr>
+                </thead>
 
-              <tbody>
-                {filteredItems.map((resource) => (
-                  <tr key={resource.id} className="border-b border-slate-200 hover:bg-slate-50/80">
-                    <td className="p-4 align-middle">
-                      <button
-                        className="text-left font-bold text-slate-950 hover:text-blue-700"
-                        onClick={() => setSelected(resource)}
-                      >
-                        {resource.title}
-                      </button>
-                      <small className="mt-1 block text-slate-500">ID: {resource.id}</small>
-                    </td>
-
-                    <td className="p-4 align-middle text-slate-700">{resource.resource_type}</td>
-
-                    <td className="p-4 align-middle">
-                      <button
-                        className={`rounded-full px-3 py-1.5 text-xs font-bold ${
-                          resource.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
-                        }`}
-                        onClick={() => handleToggleActive(resource)}
-                      >
-                        {resource.is_active ? 'Active' : 'Inactive'}
-                      </button>
-                    </td>
-
-                    <td className="p-4 align-middle">
-                      <span
-                        className={`rounded-full px-3 py-1.5 text-xs font-bold ${
-                          resource.is_indexed
-                            ? 'bg-emerald-50 text-emerald-700'
-                            : 'bg-slate-100 text-slate-500'
-                        }`}
-                      >
-                        {resource.is_indexed ? 'Indexed' : 'Not indexed'}
-                      </span>
-                    </td>
-
-                    <td className="p-4 align-middle">
-                      <div className="flex justify-end gap-2">
-                        <button className={buttonClass} onClick={() => setSelected(resource)}>
-                          View
-                        </button>
-
-                        <button className={buttonClass} onClick={() => openEditModal(resource)}>
-                          Edit
-                        </button>
-
+                <tbody>
+                  {paginatedItems.map((resource) => (
+                    <tr key={resource.id} className="border-b border-slate-200 hover:bg-slate-50/80">
+                      <td className="p-4 align-middle">
                         <button
-                          className={buttonClass}
-                          onClick={() => handleIndexResource(resource)}
-                          disabled={indexingId === resource.id}
+                          className="text-left font-bold text-slate-950 hover:text-blue-700"
+                          onClick={() => setSelected(resource)}
                         >
-                          <Wand2 size={16} />
-                          {indexingId === resource.id ? 'Indexing...' : resource.is_indexed ? 'Reindex' : 'Index'}
+                          {resource.title}
                         </button>
+                        <small className="mt-1 block text-slate-500">ID: {resource.id}</small>
+                      </td>
 
-                        {resource.is_indexed && (
+                      <td className="p-4 align-middle text-slate-700">{resource.resource_type}</td>
+
+                      <td className="p-4 align-middle">
+                        <button
+                          className={`rounded-full px-3 py-1.5 text-xs font-bold ${
+                            resource.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
+                          }`}
+                          onClick={() => handleToggleActive(resource)}
+                        >
+                          {resource.is_active ? 'Active' : 'Inactive'}
+                        </button>
+                      </td>
+
+                      <td className="p-4 align-middle">
+                        <span
+                          className={`rounded-full px-3 py-1.5 text-xs font-bold ${
+                            resource.is_indexed ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                          }`}
+                        >
+                          {resource.is_indexed ? 'Indexed' : 'Not indexed'}
+                        </span>
+                      </td>
+
+                      <td className="p-4 align-middle">
+                        <div className="flex justify-end gap-2">
+                          <button className={buttonClass} onClick={() => setSelected(resource)}>
+                            View
+                          </button>
+
+                          <button className={buttonClass} onClick={() => openEditModal(resource)}>
+                            Edit
+                          </button>
+
                           <button
                             className={buttonClass}
-                            onClick={() => handleDeindexResource(resource)}
-                            disabled={deindexingId === resource.id}
+                            onClick={() => handleIndexResource(resource)}
+                            disabled={indexingId === resource.id}
                           >
-                            {deindexingId === resource.id ? 'Deactivating...' : 'Deactivate Index'}
+                            <Wand2 size={16} />
+                            {indexingId === resource.id ? 'Indexing...' : resource.is_indexed ? 'Reindex' : 'Index'}
                           </button>
-                        )}
 
-                        <button
-                          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-extrabold text-red-700 transition hover:bg-red-100"
-                          onClick={() => handleDelete(resource)}
-                        >
-                          <Trash2 size={16} />
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          {resource.is_indexed && (
+                            <button
+                              className={buttonClass}
+                              onClick={() => handleDeindexResource(resource)}
+                              disabled={deindexingId === resource.id}
+                            >
+                              {deindexingId === resource.id ? 'Deactivating...' : 'Deactivate Index'}
+                            </button>
+                          )}
 
-                {filteredItems.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="p-8 text-center text-slate-500">
-                      No resources found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                          <button
+                            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-extrabold text-red-700 transition hover:bg-red-100"
+                            onClick={() => handleDelete(resource)}
+                          >
+                            <Trash2 size={16} />
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {paginatedItems.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="p-8 text-center text-slate-500">
+                        No resources found.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {filteredItems.length > 0 && (
+              <div className="mt-4 flex flex-col gap-3 border-t border-slate-200 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm font-semibold text-slate-500">
+                  Showing {paginationStart}-{paginationEnd} of {filteredItems.length}
+                </p>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    className={buttonClass}
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    <ChevronLeft size={16} />
+                    Previous
+                  </button>
+
+                  <span className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700">
+                    Page {currentPage} of {totalPages}
+                  </span>
+
+                  <button
+                    className={buttonClass}
+                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                    disabled={currentPage === totalPages}
+                  >
+                    Next
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -475,7 +545,7 @@ export default function ResourcesList() {
               </button>
             </div>
 
-            <div className="mb-5 grid grid-cols-2 gap-3">
+            <div className="mb-5 grid grid-cols-3 gap-3">
               <button
                 type="button"
                 className={createMode === 'text' ? darkButtonClass : buttonClass}
@@ -496,6 +566,16 @@ export default function ResourcesList() {
               >
                 File
               </button>
+              <button
+                type="button"
+                className={createMode === 'url' ? darkButtonClass : buttonClass}
+                onClick={() => {
+                  setCreateMode('url');
+                  setForm((current) => ({ ...current, resource_type: 'website' }));
+                }}
+              >
+                Website
+              </button>
             </div>
 
             <div className="grid gap-4">
@@ -515,9 +595,10 @@ export default function ResourcesList() {
                 <option value="text">Text</option>
                 <option value="document">Document</option>
                 <option value="pdf">PDF</option>
+                <option value="website">Website</option>
               </select>
 
-              {createMode === 'text' ? (
+              {createMode === 'text' && (
                 <textarea
                   className="min-h-[180px] resize-none rounded-xl border border-slate-300 p-4 text-sm outline-none focus:border-blue-600"
                   value={form.content}
@@ -525,17 +606,30 @@ export default function ResourcesList() {
                   placeholder="Paste chatbot knowledge content here..."
                   required
                 />
-              ) : (
+              )}
+
+              {createMode === 'url' && (
+                <input
+                  className="min-h-11 rounded-xl border border-slate-300 px-4 text-sm outline-none focus:border-blue-600"
+                  type="url"
+                  value={form.url}
+                  onChange={(event) => setForm((current) => ({ ...current, url: event.target.value }))}
+                  placeholder="https://example.com/page"
+                  required
+                />
+              )}
+
+              {createMode === 'file' && (
                 <label className="grid min-h-[160px] cursor-pointer place-items-center rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center transition hover:border-blue-500">
                   <div>
                     <Upload size={34} className="mx-auto mb-3 text-slate-400" />
-                    <p className="font-bold text-slate-900">{file ? file.name : 'Choose TXT, PDF, DOC, or DOCX'}</p>
+                    <p className="font-bold text-slate-900">{file ? file.name : 'Choose TXT, PDF, or DOCX'}</p>
                     <p className="mt-1 text-xs text-slate-500">Maximum file size depends on API settings.</p>
                   </div>
                   <input
                     className="hidden"
                     type="file"
-                    accept=".txt,.md,.pdf,.doc,.docx,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     onChange={handleFileChange}
                     required
                   />

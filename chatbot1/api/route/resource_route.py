@@ -5,12 +5,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.controller.resource_controller import (
     create_text_resource,
+    create_url_resource,
     delete_resource,
     get_resource,
     list_resources,
     update_resource,
     upload_resource_file,
 )
+
 from app.controller.resource_index_controller import (
     deindex_resource,
     index_resource,
@@ -26,6 +28,7 @@ from app.schemas.resource_schema import (
     ResourceSearchRequest,
     ResourceSearchResult,
     ResourceUpdateRequest,
+    ResourceUrlCreateRequest,
 )
 from app.services.auth_guard import get_current_user
 
@@ -62,6 +65,14 @@ async def resource_create(
     current_user: User = Depends(get_current_user),
 ):
     return await create_text_resource(data, db, current_user)
+
+@router.post("/url", response_model=ResourceResponse)
+async def resource_create_from_url(
+    data: ResourceUrlCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await create_url_resource(data, db, current_user)
 
 
 @router.post("/upload", response_model=ResourceResponse)
