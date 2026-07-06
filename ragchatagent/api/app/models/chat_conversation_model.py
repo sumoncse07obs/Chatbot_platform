@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.db import Base
@@ -31,6 +31,9 @@ class ChatConversation(Base):
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    needs_human: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

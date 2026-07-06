@@ -67,11 +67,15 @@ function filenameForMimeType(mimeType: string) {
 export default function WidgetChatPage() {
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const apiKey = params.get('api_key')?.trim() || '';
+  
   const externalUserId = useMemo(() => {
     const explicitId = params.get('external_user_id')?.trim();
 
-    if (explicitId) return explicitId;
-    if (!apiKey) return 'anonymous';
+    if (explicitId && explicitId !== 'anonymous' && explicitId !== 'demo-user-123') {
+      return explicitId;
+    }
+
+    if (!apiKey) return createVisitorId();
 
     return getStoredVisitorId(apiKey);
   }, [apiKey, params]);

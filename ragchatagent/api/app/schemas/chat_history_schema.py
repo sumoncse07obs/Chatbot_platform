@@ -35,6 +35,8 @@ class ChatHistoryConversationResponse(BaseModel):
     external_user_id: Optional[str] = None
     title: Optional[str] = None
     last_message_at: Optional[datetime] = None
+    needs_human: bool = False
+    resolved_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     message_count: int = 0
@@ -43,8 +45,6 @@ class ChatHistoryConversationResponse(BaseModel):
     display_name: Optional[str] = None
     visitor: Optional[ChatHistoryVisitorResponse] = None
 
-    model_config = {"from_attributes": True}
-
 
 class ChatHistoryConversationDetailResponse(ChatHistoryConversationResponse):
     messages: list[ChatHistoryMessageResponse] = []
@@ -52,6 +52,32 @@ class ChatHistoryConversationDetailResponse(ChatHistoryConversationResponse):
 
 class ChatHistoryListResponse(BaseModel):
     data: list[ChatHistoryConversationResponse]
+    total: int
+    page: int
+    per_page: int
+    last_page: int
+
+class HandoffStatusUpdateRequest(BaseModel):
+    needs_human: bool
+    
+class LeadResponse(BaseModel):
+    id: int
+    external_user_id: str
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    api_key_id: int
+    api_key_name: Optional[str] = None
+    display_name: Optional[str] = None
+    conversation_count: int = 0
+    last_message_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LeadListResponse(BaseModel):
+    data: list[LeadResponse]
     total: int
     page: int
     per_page: int

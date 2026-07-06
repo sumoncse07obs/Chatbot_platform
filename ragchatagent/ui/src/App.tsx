@@ -29,6 +29,7 @@ import WidgetInstallModule from '@/components/customer/module/widget-install';
 import WidgetChatPage from '@/components/public/WidgetChatPage';
 
 import HistoryModule from '@/components/customer/module/history';
+import LeadsModule from '@/components/customer/module/leads';
 
 export default function App() {
   return (
@@ -88,6 +89,7 @@ export default function App() {
         <Route path="apikeys/*" element={<ApiKeysModule />} />
         <Route path="widget-install/*" element={<WidgetInstallModule />} />
         <Route path="history/*" element={<HistoryModule />} />
+        <Route path="leads/*" element={<LeadsModule />} />
       </Route>
 
       <Route

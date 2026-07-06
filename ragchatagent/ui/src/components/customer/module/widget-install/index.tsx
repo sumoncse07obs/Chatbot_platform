@@ -71,7 +71,7 @@ const defaultForm: WidgetForm = {
   id: null,
   name: 'Main Website Widget',
   apiKeyId: '',
-  externalUserId: 'demo-user-123',
+  externalUserId: 'anonymous',
   embedType: 'iframe',
   position: 'bottom-right',
   width: DEFAULT_WIDTH,
@@ -103,7 +103,7 @@ function toPayload(form: WidgetForm): WidgetInstallPayload {
   return {
     name: form.name.trim() || 'Main Website Widget',
     api_key_id: Number(form.apiKeyId),
-    external_user_id: form.externalUserId.trim() || 'anonymous',
+    external_user_id: form.externalUserId.trim() || null,
     embed_type: form.embedType,
     position: form.position,
     width: Number(form.width) || DEFAULT_WIDTH,
@@ -152,7 +152,11 @@ export default function WidgetInstallModule() {
 
     const url = new URL(`${window.location.origin}/widget`);
     url.searchParams.set('api_key', realKey.trim());
-    url.searchParams.set('external_user_id', form.externalUserId.trim() || 'anonymous');
+    const externalUserId = form.externalUserId.trim();
+
+    if (externalUserId) {
+      url.searchParams.set('external_user_id', externalUserId);
+    }
 
     return url.toString();
   }, [form.externalUserId, realKey]);
@@ -385,7 +389,7 @@ export default function WidgetInstallModule() {
         body: JSON.stringify({
           api_key: realKey,
           message,
-          external_user_id: form.externalUserId.trim() || 'anonymous',
+          external_user_id: form.externalUserId.trim() || undefined,
         }),
       });
 

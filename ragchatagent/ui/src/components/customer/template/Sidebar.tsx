@@ -60,6 +60,10 @@ export default function Sidebar({ isOpen }: Props) {
           <Clock size={16} />
           <span>History</span>
         </NavLink>
+        <NavLink to="/customer/leads" className="guru-folder-item">
+          <Users size={16} />
+          <span>Leads</span>
+        </NavLink>
       </div>
     </aside>
   );

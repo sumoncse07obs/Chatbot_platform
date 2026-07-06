@@ -1,12 +1,15 @@
 import { FormEvent, MouseEvent, useEffect, useMemo, useState } from 'react';
-import { Clock, MessageCircle, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, MessageCircle, RefreshCw, Search, Trash2 } from 'lucide-react';
 import {
   deleteHistoryConversation,
   getHistoryConversation,
   listHistory,
+  updateHandoffStatus,
   HistoryConversation,
   HistoryConversationDetail,
 } from '@/components/customer/module/history/api/historyapi';
+
+type HistoryStatusFilter = 'all' | 'needs_human' | 'resolved';
 
 function formatDate(value?: string | null) {
   if (!value) return 'No date';
@@ -28,6 +31,7 @@ function truncate(value?: string | null, maxLength = 90) {
 
 export default function HistoryModule() {
   const [search, setSearch] = useState('');
+  const [status, setStatus] = useState<HistoryStatusFilter>('all');
   const [conversations, setConversations] = useState<HistoryConversation[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedConversation, setSelectedConversation] = useState<HistoryConversationDetail | null>(null);
@@ -36,6 +40,7 @@ export default function HistoryModule() {
   const [loadingList, setLoadingList] = useState(false);
   const [loadingThread, setLoadingThread] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [handoffUpdating, setHandoffUpdating] = useState(false);
   const [error, setError] = useState('');
 
   const selectedMeta = useMemo(
@@ -43,7 +48,9 @@ export default function HistoryModule() {
     [conversations, selectedId],
   );
 
-  async function loadConversations(nextPage = 1, silent = false) {
+  const selectedNeedsHuman = selectedConversation?.needs_human ?? selectedMeta?.needs_human ?? false;
+
+  async function loadConversations(nextPage = 1, silent = false, nextStatus = status) {
     try {
       if (!silent) {
         setLoadingList(true);
@@ -52,6 +59,7 @@ export default function HistoryModule() {
 
       const response = await listHistory({
         search,
+        status: nextStatus === 'all' ? '' : nextStatus,
         page: nextPage,
         per_page: 20,
       });
@@ -106,6 +114,23 @@ export default function HistoryModule() {
     }
   }
 
+  async function updateSelectedHandoffStatus(needsHuman: boolean) {
+    if (!selectedId || handoffUpdating) return;
+
+    try {
+      setHandoffUpdating(true);
+      setError('');
+
+      await updateHandoffStatus(selectedId, needsHuman);
+      await loadConversations(page, true);
+      await loadConversation(selectedId, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update handoff status');
+    } finally {
+      setHandoffUpdating(false);
+    }
+  }
+
   async function deleteConversation(conversationId: number) {
     if (deletingId) return;
 
@@ -155,6 +180,11 @@ export default function HistoryModule() {
     loadConversations(1);
   }
 
+  function handleStatusChange(nextStatus: HistoryStatusFilter) {
+    setStatus(nextStatus);
+    loadConversations(1, false, nextStatus);
+  }
+
   useEffect(() => {
     loadConversations(1);
   }, []);
@@ -175,7 +205,7 @@ export default function HistoryModule() {
     }, 5000);
 
     return () => window.clearInterval(interval);
-  }, [page, search, selectedId]);
+  }, [page, search, status, selectedId]);
 
   return (
     <div className="dashboard-page">
@@ -222,6 +252,27 @@ export default function HistoryModule() {
                 Search
               </button>
             </form>
+
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {[
+                { value: 'all', label: 'All' },
+                { value: 'needs_human', label: 'Needs reply' },
+                { value: 'resolved', label: 'Resolved' },
+              ].map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => handleStatusChange(item.value as HistoryStatusFilter)}
+                  className={`min-h-9 rounded-xl border px-2 text-xs font-extrabold transition ${
+                    status === item.value
+                      ? 'border-blue-600 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto">
@@ -230,12 +281,19 @@ export default function HistoryModule() {
             ) : conversations.length === 0 ? (
               <div className="p-6 text-center text-sm text-slate-500">No conversations found.</div>
             ) : (
-              conversations.map((conversation) => (
-                <button
+                            conversations.map((conversation) => (
+                <div
                   key={conversation.id}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setSelectedId(conversation.id)}
-                  className={`block w-full border-b border-slate-100 p-4 text-left transition hover:bg-slate-50 ${
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setSelectedId(conversation.id);
+                    }
+                  }}
+                  className={`block w-full cursor-pointer border-b border-slate-100 p-4 text-left transition hover:bg-slate-50 ${
                     selectedId === conversation.id ? 'bg-blue-50' : 'bg-white'
                   }`}
                 >
@@ -247,8 +305,16 @@ export default function HistoryModule() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <div className="truncate text-sm font-black text-slate-950">
-                            {conversation.external_user_id || `Conversation #${conversation.id}`}
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="truncate text-sm font-black text-slate-950">
+                              {conversation.external_user_id || `Conversation #${conversation.id}`}
+                            </div>
+                            {conversation.needs_human && (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-black text-amber-700">
+                                <AlertCircle size={12} />
+                                Needs reply
+                              </span>
+                            )}
                           </div>
                           <div className="mt-1 line-clamp-2 text-sm leading-5 text-slate-600">
                             {truncate(conversation.last_message)}
@@ -276,7 +342,7 @@ export default function HistoryModule() {
                       </div>
                     </div>
                   </div>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -308,9 +374,17 @@ export default function HistoryModule() {
           <div className="shrink-0 border-b border-slate-200 p-5">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <h3 className="text-lg font-black text-slate-950">
-                  {selectedMeta?.external_user_id || selectedConversation?.external_user_id || 'Conversation'}
-                </h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-black text-slate-950">
+                    {selectedMeta?.external_user_id || selectedConversation?.external_user_id || 'Conversation'}
+                  </h3>
+                  {selectedNeedsHuman && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-black text-amber-700">
+                      <AlertCircle size={13} />
+                      Needs reply
+                    </span>
+                  )}
+                </div>
                 <p className="mt-1 text-sm text-slate-500">
                   {selectedId ? `Conversation #${selectedId}` : 'Select a conversation'}
                 </p>
@@ -322,15 +396,31 @@ export default function HistoryModule() {
                 </div>
 
                 {selectedId && (
-                  <button
-                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-extrabold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
-                    type="button"
-                    onClick={() => deleteConversation(selectedId)}
-                    disabled={deletingId === selectedId}
-                  >
-                    <Trash2 size={16} />
-                    {deletingId === selectedId ? 'Deleting...' : 'Delete'}
-                  </button>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button
+                      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-extrabold transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                        selectedNeedsHuman
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                          : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                      }`}
+                      type="button"
+                      onClick={() => updateSelectedHandoffStatus(!selectedNeedsHuman)}
+                      disabled={handoffUpdating}
+                    >
+                      {selectedNeedsHuman ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                      {handoffUpdating ? 'Saving...' : selectedNeedsHuman ? 'Mark resolved' : 'Mark needs reply'}
+                    </button>
+
+                    <button
+                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-extrabold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      type="button"
+                      onClick={() => deleteConversation(selectedId)}
+                      disabled={deletingId === selectedId}
+                    >
+                      <Trash2 size={16} />
+                      {deletingId === selectedId ? 'Deleting...' : 'Delete'}
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

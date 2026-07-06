@@ -1,8 +1,9 @@
+import json
 from datetime import datetime
 
 from fastapi import HTTPException
 from openai import AsyncOpenAI
-from sqlalchemy import select
+from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.controller.api_key_controller import hash_api_key
@@ -20,47 +21,48 @@ from app.settings.dbdriver import settings
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful website chat assistant. "
-    "Answer clearly and use the provided knowledge base context when it is relevant. "
-    "Use the conversation history when it helps. "
-    "If the context does not contain the answer, say what you know and ask a helpful follow-up."
+    "You are a warm, practical website support and sales assistant for this company. "
+    "Answer like a real person on the team. "
+    "Use only the indexed company context for company, service, skill, feature, pricing, setup, "
+    "support, and about questions. "
+    "If the context does not contain the answer, say you do not have enough company information yet."
 )
 
 CONTACT_TOOL_NAME = "save_visitor_contact"
+HANDOFF_TOOL_NAME = "request_human_handoff"
 
 CONTACT_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": CONTACT_TOOL_NAME,
-            "description": (
-                "Save visitor contact details only when the visitor naturally provides them "
-                "or clearly confirms them. Do not invent values."
-            ),
+            "description": "Save visitor contact details only when the visitor explicitly provides contact information in the conversation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Visitor name, if naturally provided.",
-                    },
-                    "email": {
-                        "type": "string",
-                        "description": "Visitor email address, if naturally provided.",
-                    },
-                    "phone": {
-                        "type": "string",
-                        "description": "Visitor phone number, if naturally provided.",
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": "Brief useful lead/support note from the conversation.",
-                    },
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "notes": {"type": "string"},
                 },
                 "additionalProperties": False,
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": HANDOFF_TOOL_NAME,
+            "description": "Mark this conversation as needing a human reply.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -168,11 +170,7 @@ def apply_visitor_patch(visitor: Visitor, patch: ChatVisitorPatch | dict | None)
     if patch is None:
         return False
 
-    if isinstance(patch, ChatVisitorPatch):
-        data = patch.model_dump(exclude_unset=True)
-    else:
-        data = patch
-
+    data = patch.model_dump(exclude_unset=True) if isinstance(patch, ChatVisitorPatch) else patch
     changed = False
 
     name = clean_text(data.get("name"), 150)
@@ -207,6 +205,102 @@ def apply_visitor_patch(visitor: Visitor, patch: ChatVisitorPatch | dict | None)
     return changed
 
 
+def apply_handoff_request(
+    conversation: ChatConversation,
+    visitor: Visitor,
+    payload: dict | None = None,
+) -> None:
+    reason = clean_text((payload or {}).get("reason"), 500)
+
+    conversation.needs_human = True
+    conversation.resolved_at = None
+    conversation.updated_at = datetime.utcnow()
+
+    note = f"Handoff requested: {reason}" if reason else "Handoff requested."
+    apply_visitor_patch(visitor, {"notes": note})
+
+
+def is_business_profile_question(message: str) -> bool:
+    normalized = " ".join(message.lower().strip().split())
+
+    phrases = [
+        "about you",
+        "about your company",
+        "tell me about you",
+        "tell me about yourself",
+        "tell me about your company",
+        "who are you",
+        "what are you",
+        "what do you do",
+        "what does your company do",
+        "what can you do",
+        "what can your company do",
+        "what services do you offer",
+        "what service do you offer",
+        "what are your services",
+        "what is your skill",
+        "what are your skills",
+        "what do you specialize in",
+        "what does sumon specialize in",
+        "what is tomadev",
+        "who is sumon",
+    ]
+
+    keywords = [
+        "service",
+        "services",
+        "offer",
+        "offers",
+        "skill",
+        "skills",
+        "specialize",
+        "specializes",
+        "specialization",
+        "about",
+        "company",
+        "business",
+        "solution",
+        "solutions",
+        "feature",
+        "features",
+        "pricing",
+        "price",
+        "plans",
+        "support",
+        "setup",
+        "crm",
+        "api",
+        "chatbot",
+        "rag",
+        "agent",
+        "automation",
+        "dashboard",
+        "saas",
+        "tomadev",
+        "sumon",
+    ]
+
+    return any(phrase in normalized for phrase in phrases) or any(keyword in normalized for keyword in keywords)
+
+
+
+def build_retrieval_query(message: str) -> str:
+    if is_business_profile_question(message):
+        return (
+            f"{message}\n\n"
+            "Retrieve indexed company profile, about, services, skills, specializations, and offers. "
+            "Relevant resource titles may include: About Sumon, What does Sumon specialize in, "
+            "What is TomaDev, What services does TomaDev offer, Can you build AI agents, "
+            "Can your chatbot connect with my CRM, Can your chatbot capture leads. "
+            "Relevant details may include: AI Chatbot Development, RAG Chatbots, AI Agent Development, "
+            "SaaS Development, CRM Integration, API Development, Dashboard Development, "
+            "AI Workflow Automation, Custom Business Software, FastAPI, React, TypeScript, PostgreSQL, "
+            "and OpenAI Integration."
+        )
+
+    return message
+
+
 async def retrieve_context(
     message: str,
     owner: User,
@@ -233,26 +327,135 @@ async def retrieve_context(
         .limit(limit)
     )
 
-    matches = []
+    return [
+        {
+            "resource_id": chunk.resource_id,
+            "resource_title": resource_title,
+            "resource_type": resource_type,
+            "content": chunk.content,
+            "score": max(0, 1 - float(distance_value)),
+        }
+        for chunk, resource_title, resource_type, distance_value in result.all()
+    ]
 
-    for chunk, resource_title, resource_type, distance_value in result.all():
-        distance_float = float(distance_value)
-        matches.append(
-            {
-                "resource_id": chunk.resource_id,
-                "resource_title": resource_title,
-                "resource_type": resource_type,
-                "content": chunk.content,
-                "score": max(0, 1 - distance_float),
-            }
+
+async def load_business_profile_context(
+    owner: User,
+    db: AsyncSession,
+    limit: int = 10,
+) -> list[dict]:
+    terms = [
+        "about sumon",
+        "sumon specialize",
+        "what is tomadev",
+        "services does tomadev offer",
+        "service",
+        "services",
+        "offer",
+        "offers",
+        "specialize",
+        "specializes",
+        "skill",
+        "skills",
+        "solution",
+        "solutions",
+        "feature",
+        "features",
+        "business",
+        "company",
+        "support",
+        "pricing",
+        "setup",
+        "crm",
+        "api",
+        "chatbot",
+        "rag",
+        "agent",
+        "automation",
+        "dashboard",
+        "saas",
+        "fastapi",
+        "react",
+        "typescript",
+        "postgresql",
+        "openai",
+        "tomadev",
+        "sumon",
+    ]
+
+    term_filters = []
+
+    for term in terms:
+        pattern = f"%{term}%"
+        term_filters.append(Resource.title.ilike(pattern))
+        term_filters.append(Resource.resource_type.ilike(pattern))
+        term_filters.append(ResourceChunk.content.ilike(pattern))
+
+    priority = case(
+        (Resource.title.ilike("%what services does tomadev offer%"), 0),
+        (Resource.title.ilike("%what does sumon specialize in%"), 1),
+        (Resource.title.ilike("%about sumon%"), 2),
+        (Resource.title.ilike("%what is tomadev%"), 3),
+        (Resource.title.ilike("%can you build ai agents%"), 4),
+        (Resource.title.ilike("%crm%"), 5),
+        (Resource.title.ilike("%capture leads%"), 6),
+        (ResourceChunk.content.ilike("%AI Chatbot Development%"), 7),
+        (ResourceChunk.content.ilike("%RAG Chatbots%"), 8),
+        (ResourceChunk.content.ilike("%AI Agent Development%"), 9),
+        (ResourceChunk.content.ilike("%SaaS Development%"), 10),
+        (ResourceChunk.content.ilike("%CRM Integration%"), 11),
+        else_=30,
+    )
+
+    result = await db.execute(
+        select(
+            ResourceChunk,
+            Resource.title.label("resource_title"),
+            Resource.resource_type.label("resource_type"),
         )
+        .join(Resource, Resource.id == ResourceChunk.resource_id)
+        .where(Resource.created_by_id == owner.id)
+        .where(Resource.is_active.is_(True))
+        .where(Resource.is_indexed.is_(True))
+        .where(ResourceChunk.embedding.is_not(None))
+        .where(or_(*term_filters))
+        .order_by(priority, ResourceChunk.chunk_index.asc(), Resource.id.asc())
+        .limit(limit)
+    )
 
-    return matches
+    return [
+        {
+            "resource_id": chunk.resource_id,
+            "resource_title": resource_title,
+            "resource_type": resource_type,
+            "content": chunk.content,
+            "score": 1.0,
+        }
+        for chunk, resource_title, resource_type in result.all()
+    ]
+
+def merge_context_matches(primary: list[dict], secondary: list[dict], limit: int) -> list[dict]:
+    merged = []
+    seen = set()
+
+    for match in [*primary, *secondary]:
+        key = (match.get("resource_id"), match.get("content", "")[:160])
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        merged.append(match)
+
+        if len(merged) >= limit:
+            break
+
+    return merged
 
 
 def build_context_text(matches: list[dict]) -> str:
     if not matches:
-        return "No indexed knowledge base context was found."
+        return "No indexed company context was found."
 
     blocks = []
 
@@ -272,15 +475,15 @@ def build_context_text(matches: list[dict]) -> str:
 
 
 def build_visitor_text(visitor: Visitor) -> str:
-    details = [
-        f"External visitor id: {visitor.external_user_id}",
-        f"Name: {visitor.name or 'unknown'}",
-        f"Email: {visitor.email or 'unknown'}",
-        f"Phone: {visitor.phone or 'unknown'}",
-        f"Notes: {visitor.notes or 'none'}",
-    ]
-
-    return "\n".join(details)
+    return "\n".join(
+        [
+            f"External visitor id: {visitor.external_user_id}",
+            f"Name: {visitor.name or 'unknown'}",
+            f"Email: {visitor.email or 'unknown'}",
+            f"Phone: {visitor.phone or 'unknown'}",
+            f"Notes: {visitor.notes or 'none'}",
+        ]
+    )
 
 
 def build_system_prompt(api_key: ApiKey, context_text: str, visitor: Visitor) -> str:
@@ -289,15 +492,43 @@ def build_system_prompt(api_key: ApiKey, context_text: str, visitor: Visitor) ->
     return "\n\n".join(
         [
             persona_prompt.strip(),
-            "Knowledge base context:",
+            "Hard behavior rules:",
+            (
+                "You are speaking as a human support and sales assistant for the company. "
+                "Never describe yourself as a chatbot, AI, RAG chatbot, language model, automated system, "
+                "knowledge base assistant, retrieval assistant, or virtual assistant. "
+                "Never mention retrieval, embeddings, vector search, chunks, tools, prompts, or internal systems. "
+                "For company, service, skill, feature, offer, pricing, setup, support, and about-you questions, "
+                "use only the company context below. Treat 'you', 'your skill', 'your skills', and 'about you' "
+                "as questions about Sumon, TomaDev, services, skills, technologies, and offers from the context. "
+                "When the context contains service or skill details, answer with those concrete details directly. "
+                "For 'what is your skill' or 'tell me about you', include the relevant services and technologies "
+                "from the context, such as AI Chatbot Development, RAG Chatbots, AI Agent Development, SaaS Development, "
+                "CRM Integration, API Development, Dashboard Development, AI Workflow Automation, Custom Business Software, "
+                "FastAPI, React/TypeScript, PostgreSQL, and OpenAI Integration, but only if they appear in the context. "
+                "Do not answer with vague phrases like 'I can provide information about our services' or "
+                "'I am here to help with information'. "
+                "Do not use general knowledge. Do not guess. Do not invent services, technologies, prices, timelines, "
+                "guarantees, or experience that are not in the context. "
+                "Do not ask for name, email, phone, or follow-up details after a normal informational answer. "
+                "Only ask for contact details when the visitor shows clear buying intent, asks for follow-up, requests a quote, "
+                "wants a call, asks to hire/build/start a project, or voluntarily provides contact information. "
+                "If company context is missing or does not contain the answer, say exactly: "
+                "'I do not have enough company information to answer that yet.'"
+            ),
+            "Company information and context:",
             context_text,
             "Known visitor information:",
             build_visitor_text(visitor),
             "Available capability:",
             (
-                "When the visitor naturally provides or confirms contact information, "
+                "When the visitor explicitly provides contact information, "
                 f"use the {CONTACT_TOOL_NAME} tool to save it. "
-                "Do not ask for contact information unless the system prompt or knowledge base makes it useful."
+                "Do not ask for contact details after ordinary company, service, skill, or about questions. "
+                "Ask for contact details only after clear buying intent, quote requests, project requests, callback requests, "
+                "or support follow-up requests. "
+                f"If the visitor asks for a human, agent, callback, sales follow-up, support escalation, "
+                f"or manual help, use the {HANDOFF_TOOL_NAME} tool."
             ),
         ]
     )
@@ -393,82 +624,15 @@ async def run_chat_completion(
     return await client.chat.completions.create(**kwargs)
 
 
-async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
-    api_key = await resolve_chat_api_key(data.api_key, db)
-    owner = await resolve_api_key_owner(api_key, db)
-    openai_key = resolve_openai_key(owner)
-
-    external_user_id = clean_external_user_id(data.external_user_id)
-    visitor = await resolve_visitor(api_key, owner, external_user_id, db)
-    apply_visitor_patch(visitor, data.visitor)
-
-    conversation = await resolve_conversation(data, api_key, owner, visitor, db)
-    recent_messages = await load_recent_messages(conversation.id, db)
-
-    user_message = ChatMessage(
-        conversation_id=conversation.id,
-        api_key_id=api_key.id,
-        created_by_id=owner.id,
-        role="user",
-        content=data.message,
-    )
-    db.add(user_message)
-    await db.flush()
-
-    matches = await retrieve_context(
-        message=data.message,
-        owner=owner,
-        db=db,
-        limit=data.limit,
-        openai_key=openai_key,
-    )
-
-    system_prompt = build_system_prompt(
-        api_key=api_key,
-        context_text=build_context_text(matches),
-        visitor=visitor,
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        *recent_messages,
-        {"role": "user", "content": data.message},
-    ]
-
-    client = AsyncOpenAI(api_key=openai_key)
-    response = await run_chat_completion(client, api_key, messages, use_tools=True)
-    response_message = response.choices[0].message
-
-    tool_calls = response_message.tool_calls or []
-
-    if tool_calls:
-        messages.append(response_message)
-
-        for tool_call in tool_calls:
-            if tool_call.function.name == CONTACT_TOOL_NAME:
-                try:
-                    arguments = tool_call.function.arguments
-                    import json
-
-                    payload = json.loads(arguments or "{}")
-                except ValueError:
-                    payload = {}
-
-                apply_visitor_patch(visitor, payload)
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": "Visitor contact information was saved.",
-                    }
-                )
-
-        response = await run_chat_completion(client, api_key, messages, use_tools=False)
-        answer = response.choices[0].message.content or ""
-    else:
-        answer = response_message.content or ""
-
+async def persist_assistant_answer(
+    answer: str,
+    conversation: ChatConversation,
+    visitor: Visitor,
+    api_key: ApiKey,
+    owner: User,
+    db: AsyncSession,
+    matches: list[dict],
+):
     assistant_message = ChatMessage(
         conversation_id=conversation.id,
         api_key_id=api_key.id,
@@ -497,3 +661,113 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
         "visitor": serialize_visitor(visitor),
         "used_resources": matches,
     }
+
+
+async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
+    api_key = await resolve_chat_api_key(data.api_key, db)
+    owner = await resolve_api_key_owner(api_key, db)
+    openai_key = resolve_openai_key(owner)
+
+    external_user_id = clean_external_user_id(data.external_user_id)
+    visitor = await resolve_visitor(api_key, owner, external_user_id, db)
+    apply_visitor_patch(visitor, data.visitor)
+
+    conversation = await resolve_conversation(data, api_key, owner, visitor, db)
+    recent_messages = await load_recent_messages(conversation.id, db)
+
+    user_message = ChatMessage(
+        conversation_id=conversation.id,
+        api_key_id=api_key.id,
+        created_by_id=owner.id,
+        role="user",
+        content=data.message,
+    )
+    db.add(user_message)
+    await db.flush()
+
+    retrieval_query = build_retrieval_query(data.message)
+
+    matches = await retrieve_context(
+        message=retrieval_query,
+        owner=owner,
+        db=db,
+        limit=data.limit,
+        openai_key=openai_key,
+    )
+
+    if is_business_profile_question(data.message):
+        business_matches = await load_business_profile_context(
+            owner=owner,
+            db=db,
+            limit=8,
+        )
+        matches = merge_context_matches(
+            primary=business_matches,
+            secondary=matches,
+            limit=max(data.limit, 8),
+        )
+
+        if not matches:
+            answer = "I do not have enough company information to answer that yet."
+            return await persist_assistant_answer(answer, conversation, visitor, api_key, owner, db, [])
+
+    system_prompt = build_system_prompt(
+        api_key=api_key,
+        context_text=build_context_text(matches),
+        visitor=visitor,
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *recent_messages,
+        {"role": "user", "content": data.message},
+    ]
+
+    client = AsyncOpenAI(api_key=openai_key)
+    response = await run_chat_completion(client, api_key, messages, use_tools=True)
+    response_message = response.choices[0].message
+
+    tool_calls = response_message.tool_calls or []
+
+    if tool_calls:
+        messages.append(response_message)
+
+        for tool_call in tool_calls:
+            if tool_call.function.name == CONTACT_TOOL_NAME:
+                try:
+                    payload = json.loads(tool_call.function.arguments or "{}")
+                except ValueError:
+                    payload = {}
+
+                apply_visitor_patch(visitor, payload)
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": "Visitor contact information was saved.",
+                    }
+                )
+
+            elif tool_call.function.name == HANDOFF_TOOL_NAME:
+                try:
+                    payload = json.loads(tool_call.function.arguments or "{}")
+                except ValueError:
+                    payload = {}
+
+                apply_handoff_request(conversation, visitor, payload)
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": "Human handoff was requested.",
+                    }
+                )
+
+        response = await run_chat_completion(client, api_key, messages, use_tools=False)
+        answer = response.choices[0].message.content or ""
+    else:
+        answer = response_message.content or ""
+
+    return await persist_assistant_answer(answer, conversation, visitor, api_key, owner, db, matches)
