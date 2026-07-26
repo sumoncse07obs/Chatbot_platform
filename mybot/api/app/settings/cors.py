@@ -9,7 +9,7 @@ def setup_cors(app):
             "http://127.0.0.1:3000",
             "http://localhost:5173",
             "http://127.0.0.1:5173",
-            "https://myboat-seven.vercel.app",
+            "https://fapibot.vercel.app",
         ],
         allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
         allow_credentials=True,
