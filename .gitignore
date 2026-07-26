@@ -6,3 +6,13 @@ protected/data/*.db
 themes/classic/views/
 ragchatagent/api/storage/resources/9e818a3bbfd54ba891d0c3b7fe21cb43.pdf
 ragchatagent/api/instruction.txt
+
+# Frontend dependencies and build output
+chatbot1/ui/node_modules/
+chatbot1/ui/dist/
+
+ragchatagent/ui/node_modules/
+ragchatagent/ui/dist/
+
+mybot/ui/node_modules/
+mybot/ui/dist/
