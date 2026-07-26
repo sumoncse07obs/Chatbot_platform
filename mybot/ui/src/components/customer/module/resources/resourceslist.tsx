@@ -141,6 +141,7 @@ export default function ResourcesList() {
       title: resource.title,
       resource_type: resource.resource_type,
       content: resource.content || '',
+      url: resource.url || '',
       is_active: resource.is_active,
     });
   }
