@@ -14,6 +14,13 @@ from app.settings.cors import setup_cors
 
 app = FastAPI(title="BotAPI")
 
+#app = FastAPI(
+#    title="BotAPI",
+#    docs_url=None,
+#    redoc_url=None,
+#    openapi_url=None,
+#)
+
 setup_cors(app)
 
 app.mount("/uploads", StaticFiles(directory="storage/uploads"), name="uploads")
@@ -33,3 +40,7 @@ app.include_router(voice_router)
 @app.get("/")
 async def root():
     return {"message": "API Running"}
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse("storage/uploads/botlogo.png", media_type="image/png")
