@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSIONS: int = 1536
     OPENAI_KEY_ENCRYPTION_SECRET: str
 
+    VAPI_TOOL_SECRET: str = ""
+    VAPI_CHAT_API_KEY: str = ""
+
     @property
     def DATABASE_URL(self) -> str:
         return (
