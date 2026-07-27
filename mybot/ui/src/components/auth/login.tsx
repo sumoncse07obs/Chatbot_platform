@@ -5,7 +5,7 @@ import { login, dashboardPathForRole, saveAuth } from '@/api/auth/auth';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -79,12 +79,37 @@ export default function LoginPage() {
         </form>
 
         <p className="mt-5 text-center text-sm text-slate-500">
-          No account?{' '}
-          <Link to="/register" className="font-extrabold text-blue-600 hover:text-blue-700">
+        {/*  No account?{' '}
+           <Link to="/register" className="font-extrabold text-blue-600 hover:text-blue-700">
             Register as user
-          </Link>
+          </Link>*/}
         </p>
       </section>
+
+    <button
+  type="button"
+  onClick={() => setIsChatOpen((isOpen) => !isOpen)}
+  className="fixed bottom-5 right-5 z-[999999] rounded-full bg-slate-950 px-4 py-3 font-bold text-white shadow-[0_10px_30px_rgba(0,0,0,0.2)] transition hover:bg-slate-800"
+  aria-expanded={isChatOpen}
+  aria-controls="chat-widget"
+>
+  {isChatOpen ? 'Close' : 'Chat with me'}
+</button>
+
+{isChatOpen && (
+  <div
+    id="chat-widget"
+    className="fixed bottom-[72px] right-5 z-[999999] h-[620px] w-[380px] overflow-hidden rounded-2xl bg-white shadow-[0_14px_40px_rgba(0,0,0,0.22)] max-sm:bottom-[72px] max-sm:left-3 max-sm:right-3 max-sm:h-[calc(100dvh-96px)] max-sm:w-auto"
+  >
+    <iframe
+      src="https://fapibot.vercel.app/widget?api_key=ck_live_0Ifb90uKaH89Yy_pGQl4hlW-djpgIhk3x5ml1Vy-qQU&external_user_id=anonymous"
+      title="Chat Widget"
+      allow="microphone; autoplay"
+      className="h-full w-full border-0 bg-transparent"
+    />
+  </div>
+)}
+
     </main>
   );
 }
