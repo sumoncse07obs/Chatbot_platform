@@ -2,14 +2,14 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.api_key_model import ApiKey
 from app.models.chat_conversation_model import ChatConversation
 from app.models.conversation_pending_action_model import ConversationPendingAction
-from app.models.resource_chunk_model import ResourceChunk
 from app.models.resource_model import Resource
+from app.models.resource_term_model import ResourceTerm
 from app.models.user_model import User
 
 
@@ -74,7 +74,6 @@ def requests_human(message: str) -> bool:
         "support team",
         "customer support",
         "representative",
-        "agent",
     )
 
     return any(phrase in normalized for phrase in phrases)
@@ -82,10 +81,10 @@ def requests_human(message: str) -> bool:
 
 def extract_candidate_terms(message: str) -> list[str]:
     """
-    Return only clearly identity-sensitive values.
+    Extract identity-sensitive values only.
 
-    General natural-language words are deliberately excluded. They are handled
-    by normal grounded RAG, not exact identity verification.
+    General language remains a normal RAG question. The extracted values are
+    verified against the current tenant's resource_terms catalogue.
     """
     terms: list[str] = []
 
@@ -99,10 +98,7 @@ def extract_candidate_terms(message: str) -> list[str]:
     )
     terms.extend(email_values)
 
-    phone_values = re.findall(
-        r"\+?\d[\d\s().-]{6,}\d",
-        message,
-    )
+    phone_values = re.findall(r"\+?\d[\d\s().-]{6,}\d", message)
     terms.extend(phone_values)
 
     identifier_values = re.findall(
@@ -112,16 +108,53 @@ def extract_candidate_terms(message: str) -> list[str]:
     )
     terms.extend(identifier_values)
 
+    ignored_title_words = {
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "tell",
+        "please",
+        "could",
+        "would",
+        "should",
+        "does",
+        "your",
+        "about",
+        "there",
+        "this",
+        "that",
+        "have",
+        "need",
+        "want",
+        "can",
+        "the",
+    }
+
+    title_case_values = re.findall(
+        r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}\b",
+        message,
+    )
+    terms.extend(
+        value
+        for value in title_case_values
+        if normalize_text(value) not in ignored_title_words
+    )
+
     unique_terms: list[str] = []
     seen: set[str] = set()
 
     for term in terms:
         normalized = normalize_text(term)
+
         if normalized and normalized not in seen:
             seen.add(normalized)
             unique_terms.append(term)
 
     return unique_terms[:8]
+
 
 async def get_pending_action(
     conversation: ChatConversation,
@@ -129,11 +162,14 @@ async def get_pending_action(
     db: AsyncSession,
 ) -> ConversationPendingAction | None:
     result = await db.execute(
-        select(ConversationPendingAction).where(
+        select(ConversationPendingAction)
+        .where(
             ConversationPendingAction.conversation_id == conversation.id,
             ConversationPendingAction.api_key_id == api_key.id,
             ConversationPendingAction.status == PENDING_STATUS,
         )
+        .order_by(ConversationPendingAction.id.desc())
+        .limit(1)
     )
     pending = result.scalar_one_or_none()
 
@@ -151,60 +187,113 @@ async def exact_search(
     db: AsyncSession,
     limit: int = 8,
 ) -> list[dict]:
-    """
-    Exact containment search is tenant-scoped. It is an evidence source, not an answer.
-    PostgreSQL full-text/trigram indexes can replace this implementation later.
-    """
-    matches: list[dict] = []
-    seen_chunk_ids: set[int] = set()
+    normalized_terms = [
+        normalize_text(term)
+        for term in terms
+        if normalize_text(term)
+    ]
 
-    for term in terms:
-        pattern = f"%{term}%"
+    if not normalized_terms:
+        return []
 
-        result = await db.execute(
-            select(ResourceChunk, Resource.title, Resource.resource_type)
-            .join(Resource, Resource.id == ResourceChunk.resource_id)
-            .where(Resource.created_by_id == owner.id)
-            .where(Resource.is_active.is_(True))
-            .where(Resource.is_indexed.is_(True))
-            .where(
-                ResourceChunk.content.ilike(pattern)
-                | Resource.title.ilike(pattern)
-            )
-            .order_by(ResourceChunk.chunk_index.asc())
-            .limit(limit)
-        )
+    result = await db.execute(
+        select(ResourceTerm, Resource.title)
+        .join(Resource, Resource.id == ResourceTerm.resource_id)
+        .where(ResourceTerm.created_by_id == owner.id)
+        .where(ResourceTerm.is_active.is_(True))
+        .where(ResourceTerm.normalized_term.in_(normalized_terms))
+        .where(Resource.is_active.is_(True))
+        .where(Resource.is_indexed.is_(True))
+        .limit(limit)
+    )
 
-        for chunk, title, resource_type in result.all():
-            if chunk.id in seen_chunk_ids:
-                continue
-
-            seen_chunk_ids.add(chunk.id)
-            matches.append(
-                {
-                    "term": term,
-                    "resource_id": chunk.resource_id,
-                    "chunk_id": chunk.id,
-                    "resource_title": title,
-                    "resource_type": resource_type,
-                    "content": chunk.content,
-                }
-            )
-
-    return matches[:limit]
+    return [
+        {
+            "term": resource_term.term,
+            "normalized_term": resource_term.normalized_term,
+            "resource_id": resource_term.resource_id,
+            "chunk_id": resource_term.resource_chunk_id,
+            "resource_title": resource_title,
+            "resource_type": resource_term.term_type,
+            "content": resource_term.source_text,
+        }
+        for resource_term, resource_title in result.all()
+    ]
 
 
 def pick_unverified_term(
     terms: list[str],
     exact_matches: list[dict],
 ) -> str | None:
-    matched_terms = {normalize_text(match["term"]) for match in exact_matches}
+    matched_terms = {
+        match["normalized_term"]
+        for match in exact_matches
+    }
 
     for term in terms:
         if normalize_text(term) not in matched_terms:
             return term
 
     return None
+
+
+async def find_close_candidate(
+    requested_term: str,
+    owner: User,
+    db: AsyncSession,
+) -> dict | None:
+    """
+    Return a candidate only if there is exactly one distinct verified term.
+
+    Similarity only suggests a clarification. It never authorizes an answer.
+    """
+    normalized_requested_term = normalize_text(requested_term)
+
+    if len(normalized_requested_term) < 3:
+        return None
+
+    similarity_score = func.similarity(
+        ResourceTerm.normalized_term,
+        normalized_requested_term,
+    )
+
+    result = await db.execute(
+        select(
+            ResourceTerm,
+            Resource.title.label("resource_title"),
+            similarity_score.label("score"),
+        )
+        .join(Resource, Resource.id == ResourceTerm.resource_id)
+        .where(ResourceTerm.created_by_id == owner.id)
+        .where(ResourceTerm.is_active.is_(True))
+        .where(ResourceTerm.normalized_term != normalized_requested_term)
+        .where(Resource.is_active.is_(True))
+        .where(Resource.is_indexed.is_(True))
+        .where(similarity_score >= 0.30)
+        .order_by(similarity_score.desc())
+        .limit(20)
+    )
+
+    candidates_by_term: dict[str, dict] = {}
+
+    for resource_term, resource_title, score in result.all():
+        if resource_term.normalized_term in candidates_by_term:
+            continue
+
+        candidates_by_term[resource_term.normalized_term] = {
+            "term": resource_term.term,
+            "resource_id": resource_term.resource_id,
+            "chunk_id": resource_term.resource_chunk_id,
+            "resource_title": resource_title,
+            "score": float(score),
+        }
+
+    candidates = list(candidates_by_term.values())
+
+    if len(candidates) != 1:
+        return None
+
+    return candidates[0]
 
 
 async def save_pending_clarification(
@@ -235,6 +324,7 @@ async def save_pending_clarification(
                 "resource_id": candidate["resource_id"],
                 "resource_title": candidate["resource_title"],
                 "chunk_id": candidate["chunk_id"],
+                "similarity_score": candidate["score"],
             },
             expires_at=datetime.utcnow() + timedelta(minutes=10),
         )
@@ -256,9 +346,12 @@ async def resolve_pending_clarification(
         pending.status = CONFIRMED_STATUS
         pending.resolved_at = datetime.utcnow()
 
-        corrected_query = pending.original_user_text.replace(
-            pending.uncertain_term,
+        corrected_query = re.sub(
+            re.escape(pending.uncertain_term),
             pending.candidate_term,
+            pending.original_user_text,
+            count=1,
+            flags=re.IGNORECASE,
         )
 
         return PreRagDecision(
@@ -298,6 +391,7 @@ async def decide_pre_rag_action(
         api_key=api_key,
         db=db,
     )
+
     if pending_decision:
         return pending_decision
 
@@ -311,17 +405,41 @@ async def decide_pre_rag_action(
         )
 
     terms = extract_candidate_terms(message)
-    exact_matches = await exact_search(terms=terms, owner=owner, db=db)
-
-    if not semantic_matches:
-        return PreRagDecision(
-            action=NOT_FOUND,
-            message="I do not have enough information in the available resources to answer that.",
-        )
+    exact_matches = await exact_search(
+        terms=terms,
+        owner=owner,
+        db=db,
+    )
 
     unverified_term = pick_unverified_term(terms, exact_matches)
 
     if unverified_term:
+        candidate = await find_close_candidate(
+            requested_term=unverified_term,
+            owner=owner,
+            db=db,
+        )
+
+        if candidate:
+            await save_pending_clarification(
+                conversation=conversation,
+                api_key=api_key,
+                owner=owner,
+                original_user_text=message,
+                uncertain_term=unverified_term,
+                candidate=candidate,
+                db=db,
+            )
+
+            return PreRagDecision(
+                action=CLARIFY,
+                message=(
+                    f"I do not have information about {unverified_term}. "
+                    f"Did you mean {candidate['term']}?"
+                ),
+                candidate_term=candidate["term"],
+            )
+
         return PreRagDecision(
             action=NOT_FOUND,
             message=(
@@ -330,8 +448,16 @@ async def decide_pre_rag_action(
             ),
         )
 
+    if not semantic_matches:
+        return PreRagDecision(
+            action=NOT_FOUND,
+            message="I do not have enough information in the available resources to answer that.",
+        )
 
-    best_score = max(float(match.get("score", 0)) for match in semantic_matches)
+    best_score = max(
+        float(match.get("score", 0))
+        for match in semantic_matches
+    )
 
     if best_score < 0.70:
         return PreRagDecision(
