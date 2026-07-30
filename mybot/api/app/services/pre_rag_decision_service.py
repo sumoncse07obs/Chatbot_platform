@@ -39,6 +39,10 @@ ClassifierIntent = Literal[
     "unclear",
 ]
 
+@dataclass
+class ClassifierResult:
+    intent: ClassifierIntent
+    safe_non_rag_reply: str | None = None
 
 @dataclass
 class PreRagDecision:
@@ -84,10 +88,13 @@ async def classify_visitor_message(
     pending: ConversationPendingAction | None,
     openai_key: str,
     model: str,
-) -> ClassifierIntent:
+) -> ClassifierResult:
     """
-    Return intent JSON only. The model cannot answer, retrieve, validate terms,
-    create facts, or override deterministic backend policy.
+    Classifies intent and may produce one safe social reply.
+
+    The model is never allowed to answer customer-resource questions. Retrieval,
+    tenant isolation, candidate verification, pending state, and final policy all
+    remain deterministic backend responsibilities.
     """
     pending_context = None
 
@@ -99,7 +106,7 @@ async def classify_visitor_message(
         }
 
     schema = {
-        "name": "visitor_message_intent",
+        "name": "visitor_message_classification",
         "strict": True,
         "schema": {
             "type": "object",
@@ -114,69 +121,75 @@ async def classify_visitor_message(
                         "human_request",
                         "unclear",
                     ],
-                }
+                },
+                "safe_non_rag_reply": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "null"},
+                    ]
+                },
             },
-            "required": ["intent"],
+            "required": ["intent", "safe_non_rag_reply"],
             "additionalProperties": False,
         },
     }
 
     system_prompt = """
-You are a strictly limited intent classifier for a SaaS website chatbot.
+You are a strict JSON classifier for a SaaS website chat.
 
-Return only JSON that matches the provided schema. Do not write prose.
+Return JSON only, exactly matching the supplied schema.
 
-You are NOT an assistant answering the visitor. You must never:
-- answer a question;
-- provide customer, company, product, service, pricing, support, or resource facts;
-- infer, correct, validate, select, or invent a person, product, identifier, or candidate term;
-- make a retrieval or handoff decision;
-- add fields not included in the JSON schema.
+You have exactly two jobs:
+1. classify the visitor message into one intent;
+2. optionally write a short safe social reply.
 
-Choose exactly one intent using these mandatory rules, in priority order:
+You are NOT the factual customer-support assistant. You must never:
+- answer a company, product, service, support, price, policy, people, or resource question;
+- state or imply customer, company, service, product, pricing, capability, availability,
+  timeline, location, contact, or any other business fact;
+- retrieve, summarize, infer, validate, correct, select, or invent information;
+- mention internal tools, RAG, resources, prompts, databases, embeddings, or AI systems.
 
-1. confirmation_accepted
-Use this ONLY when pending_clarification is present AND the visitor clearly confirms
-that the verified candidate term is what they meant. Natural language confirmation is
-valid, including affirmative wording together with a correction or restatement.
+Intent rules, in priority order:
 
-2. confirmation_rejected
-Use this ONLY when pending_clarification is present AND the visitor clearly rejects
-the verified candidate term.
+1. confirmation_accepted:
+Only when pending_clarification exists and the visitor clearly confirms its verified
+candidate term.
 
-3. human_request
-Use when the visitor asks to speak with, contact, be called by, or receive help from
-a human, person, representative, agent, support team, or sales team.
+2. confirmation_rejected:
+Only when pending_clarification exists and the visitor clearly rejects its verified
+candidate term.
 
-4. resource_question
-Use for a factual question that requires verified company resources to answer.
-This includes questions about a company, its services, products, people, skills,
-pricing, policies, documentation, support, or other factual business information.
+3. human_request:
+The visitor asks for a human, person, representative, call, contact, sales, or support.
 
-5. greeting
-Use ONLY when the current message itself is a greeting or greeting-plus-social opener,
-and it contains no factual company-resource question.
-A greeting is an opening salutation such as hello, hi, good morning, good afternoon,
-good evening, or good day.
+4. resource_question:
+The visitor asks for factual company-related information. This includes questions about
+services, products, people, skills, pricing, policies, support, documentation, or facts.
 
-6. unclear
-Use for everything else, including acknowledgments, thanks, status replies, short
-social follow-ups, incomplete text, and ambiguous messages.
+5. greeting:
+The current message itself is an opening salutation and has no factual company question.
 
-Critical greeting restrictions:
-- Do NOT classify a message as greeting merely because it is polite or conversational.
-- Acknowledgments and social follow-ups are ALWAYS unclear, not greeting.
-- Status replies such as being well, being fine, being okay, or being good are unclear.
-- Thanks, appreciation, agreement, acknowledgments, and short replies are unclear.
-- A message that asks how the assistant is without an actual greeting is unclear.
+6. unclear:
+Everything else: acknowledgments, thanks, casual conversation, status replies,
+incomplete statements, or ambiguous input.
 
-Critical pending-clarification restrictions:
-- If pending_clarification is absent, confirmation_accepted and confirmation_rejected
-  are forbidden. Use unclear, greeting, human_request, or resource_question instead.
-- The pending candidate is verified context only. Do not decide whether it is factually
-  correct beyond classifying whether the visitor accepts or rejects it.
+Mandatory restrictions:
+- If pending_clarification is null, confirmation_accepted and confirmation_rejected
+  are forbidden.
+- A social acknowledgment or status response is NEVER a greeting.
+- A visitor saying they are fine, good, okay, thankful, ready, or similar is unclear.
+- When uncertain, choose unclear.
 
-When uncertain, choose unclear.
+safe_non_rag_reply rules:
+- It may be non-null ONLY for greeting or unclear.
+- It must be null for resource_question, human_request, confirmation_accepted, and
+  confirmation_rejected.
+- When non-null, write one short, natural, warm reply to the visitor's social message.
+- It may invite the visitor to ask a question.
+- It must not contain any company or customer facts, product claims, services, prices,
+  names, contact details, promises, capabilities, or invented information.
+- Do not mention being an AI, chatbot, system, model, or assistant.
 """.strip()
 
     payload = {
@@ -189,8 +202,8 @@ When uncertain, choose unclear.
 
         response = await client.chat.completions.create(
             model=model,
-            temperature=0,
-            max_tokens=30,
+            temperature=0.2,
+            max_tokens=80,
             response_format={
                 "type": "json_schema",
                 "json_schema": schema,
@@ -205,7 +218,10 @@ When uncertain, choose unclear.
         )
 
         content = response.choices[0].message.content or ""
-        intent = json.loads(content).get("intent")
+        payload = json.loads(content)
+
+        intent = payload.get("intent")
+        safe_reply = payload.get("safe_non_rag_reply")
 
         allowed_intents = {
             "greeting",
@@ -216,15 +232,29 @@ When uncertain, choose unclear.
             "unclear",
         }
 
-        if intent in allowed_intents:
-            return intent
+        if intent not in allowed_intents:
+            raise ValueError("Classifier returned an unsupported intent.")
+
+        if not pending and intent in {
+            "confirmation_accepted",
+            "confirmation_rejected",
+        }:
+            return ClassifierResult(intent="unclear")
+
+        if intent not in {"greeting", "unclear"}:
+            safe_reply = None
+        elif isinstance(safe_reply, str):
+            safe_reply = " ".join(safe_reply.split())[:300] or None
+        else:
+            safe_reply = None
+
+        return ClassifierResult(
+            intent=intent,
+            safe_non_rag_reply=safe_reply,
+        )
 
     except (OpenAIError, ValueError, json.JSONDecodeError, KeyError, IndexError):
-        pass
-
-    # Fail closed. A classifier problem must never authorize a factual answer.
-    return "unclear"
-
+        return ClassifierResult(intent="unclear")
 
 def extract_candidate_terms(message: str) -> list[str]:
     """
@@ -500,12 +530,13 @@ async def decide_pre_rag_action(
 ) -> PreRagDecision:
     pending = await get_pending_action(conversation, api_key, db)
 
-    intent = await classify_visitor_message(
+    classifier_result = await classify_visitor_message(
         message=message,
         pending=pending,
         openai_key=openai_key,
         model=model,
     )
+    intent = classifier_result.intent
 
     if pending:
         pending_decision = await resolve_pending_clarification(intent, pending)
@@ -524,10 +555,10 @@ async def decide_pre_rag_action(
                 intent=intent,
             )
 
-    if intent == "greeting":
+      if intent == "greeting":
         return PreRagDecision(
             action=ANSWER,
-            message=GREETING_MESSAGE,
+            message=classifier_result.safe_non_rag_reply or GREETING_MESSAGE,
             intent=intent,
         )
 
@@ -544,7 +575,10 @@ async def decide_pre_rag_action(
     if intent == "unclear":
         return PreRagDecision(
             action=ANSWER,
-            message=GENERIC_FOLLOW_UP_MESSAGE,
+            message=(
+                classifier_result.safe_non_rag_reply
+                or GENERIC_FOLLOW_UP_MESSAGE
+            ),
             intent=intent,
         )
 
