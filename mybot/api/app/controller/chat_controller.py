@@ -17,6 +17,7 @@ from app.models.visitor_model import Visitor
 from app.services.pre_rag_decision_service import (
     ANSWER,
     HANDOFF,
+    apply_semantic_policy,
     decide_pre_rag_action,
 )
 from app.schemas.chat_schema import ChatRequest, ChatVisitorPatch
@@ -490,21 +491,14 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
     db.add(user_message)
     await db.flush()
 
-    semantic_matches = await retrieve_context(
-        message=data.message,
-        owner=owner,
-        db=db,
-        limit=data.limit,
-        openai_key=openai_key,
-    )
-
     decision = await decide_pre_rag_action(
         message=data.message,
         conversation=conversation,
         api_key=api_key,
         owner=owner,
-        semantic_matches=semantic_matches,
         db=db,
+        openai_key=openai_key,
+        model=settings.CHAT_MODEL,
     )
 
     if decision.action == HANDOFF:
@@ -515,6 +509,19 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
         )
         return await persist_assistant_answer(
             answer=decision.message or "A support team member will follow up.",
+            conversation=conversation,
+            visitor=visitor,
+            api_key=api_key,
+            owner=owner,
+            db=db,
+            matches=[],
+            decision=decision.action,
+        )
+
+    # Greetings are intentionally answered without embedding/vector retrieval.
+    if decision.action == ANSWER and decision.message:
+        return await persist_assistant_answer(
+            answer=decision.message,
             conversation=conversation,
             visitor=visitor,
             api_key=api_key,
@@ -545,6 +552,23 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
         limit=data.limit,
         openai_key=openai_key,
     )
+
+    decision = apply_semantic_policy(
+        decision=decision,
+        semantic_matches=matches,
+    )
+
+    if decision.action != ANSWER:
+        return await persist_assistant_answer(
+            answer=decision.message or "I do not have enough information to answer that.",
+            conversation=conversation,
+            visitor=visitor,
+            api_key=api_key,
+            owner=owner,
+            db=db,
+            matches=[],
+            decision=decision.action,
+        )
 
     system_prompt = build_system_prompt(
         api_key=api_key,

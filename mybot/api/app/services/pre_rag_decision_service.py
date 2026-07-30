@@ -1,7 +1,10 @@
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
+from openai import AsyncOpenAI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +27,17 @@ REJECTED_STATUS = "rejected"
 CANCELLED_STATUS = "cancelled"
 EXPIRED_STATUS = "expired"
 
+GREETING_MESSAGE = "Hi! How can I help you today?"
+
+ClassifierIntent = Literal[
+    "greeting",
+    "resource_question",
+    "confirmation_accepted",
+    "confirmation_rejected",
+    "human_request",
+    "unclear",
+]
+
 
 @dataclass
 class PreRagDecision:
@@ -32,59 +46,189 @@ class PreRagDecision:
     retrieval_query: str | None = None
     candidate_term: str | None = None
     evidence: list[dict] | None = None
+    intent: ClassifierIntent | None = None
 
 
 def normalize_text(value: str) -> str:
     return " ".join(value.lower().strip().split())
 
 
-def looks_like_confirmation(message: str) -> bool:
-    return normalize_text(message) in {
-        "yes",
-        "yeah",
-        "yep",
-        "correct",
-        "that is correct",
-        "that's correct",
-        "i meant that",
-        "i mean that",
+async def get_pending_action(
+    conversation: ChatConversation,
+    api_key: ApiKey,
+    db: AsyncSession,
+) -> ConversationPendingAction | None:
+    result = await db.execute(
+        select(ConversationPendingAction)
+        .where(
+            ConversationPendingAction.conversation_id == conversation.id,
+            ConversationPendingAction.api_key_id == api_key.id,
+            ConversationPendingAction.status == PENDING_STATUS,
+        )
+        .order_by(ConversationPendingAction.id.desc())
+        .limit(1)
+    )
+    pending = result.scalar_one_or_none()
+
+    if pending and pending.expires_at <= datetime.utcnow():
+        pending.status = EXPIRED_STATUS
+        pending.resolved_at = datetime.utcnow()
+        return None
+
+    return pending
+
+
+async def classify_visitor_message(
+    message: str,
+    pending: ConversationPendingAction | None,
+    openai_key: str,
+    model: str,
+) -> ClassifierIntent:
+    """
+    Classifies message intent only.
+
+    This model call is never permitted to answer the visitor, decide which
+    resource is correct, produce company facts, or override database policy.
+    """
+    pending_context = None
+
+    if pending:
+        pending_context = {
+            "original_question": pending.original_user_text,
+            "uncertain_term": pending.uncertain_term,
+            "verified_candidate_term": pending.candidate_term,
+        }
+
+    schema = {
+        "name": "visitor_message_intent",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": [
+                        "greeting",
+                        "resource_question",
+                        "confirmation_accepted",
+                        "confirmation_rejected",
+                        "human_request",
+                        "unclear",
+                    ],
+                }
+            },
+            "required": ["intent"],
+            "additionalProperties": False,
+        },
     }
 
-
-def looks_like_rejection(message: str) -> bool:
-    return normalize_text(message) in {
-        "no",
-        "nope",
-        "not that",
-        "that is not correct",
-        "that's not correct",
-    }
-
-
-def requests_human(message: str) -> bool:
-    normalized = normalize_text(message)
-
-    phrases = (
-        "talk to a human",
-        "speak to a human",
-        "human support",
-        "real person",
-        "call me",
-        "contact me",
-        "support team",
-        "customer support",
-        "representative",
+    system_prompt = (
+        "You are a narrowly scoped intent classifier for a SaaS website chat. "
+        "Return JSON that matches the supplied schema and nothing else. "
+        "Never answer the visitor's question. Never provide or infer company facts. "
+        "Never choose, correct, validate, or invent a candidate term. "
+        "Use confirmation_accepted only when pending clarification context exists and "
+        "the visitor clearly confirms the verified candidate term, including natural "
+        "language such as 'yes I mean Sumon' or 'yes, I meant Sumon'. "
+        "Use confirmation_rejected only when pending clarification context exists and "
+        "the visitor clearly rejects that candidate. "
+        "Use greeting for a social greeting with no factual company-resource question. "
+        "Use human_request when the visitor asks to speak with, contact, or be helped "
+        "by a person. Use resource_question for factual questions that need information "
+        "from the company's verified resources. Use unclear when none applies."
     )
 
-    return any(phrase in normalized for phrase in phrases)
+    user_payload = {
+        "message": message,
+        "pending_clarification": pending_context,
+    }
+
+    try:
+        client = AsyncOpenAI(api_key=openai_key)
+        response = await client.chat.completions.create(
+            model=model,
+            temperature=0,
+            max_tokens=30,
+            response_format={
+                "type": "json_schema",
+                "json_schema": schema,
+            },
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(user_payload, ensure_ascii=False),
+                },
+            ],
+        )
+
+        content = response.choices[0].message.content or ""
+        intent = json.loads(content).get("intent")
+
+        allowed_intents = {
+            "greeting",
+            "resource_question",
+            "confirmation_accepted",
+            "confirmation_rejected",
+            "human_request",
+            "unclear",
+        }
+
+        if intent in allowed_intents:
+            return intent
+    except (ValueError, json.JSONDecodeError, KeyError, IndexError):
+        pass
+
+    # Fail closed: a classifier failure can never authorize an answer.
+    return "unclear"
+
+
+async def exact_search(
+    terms: list[str],
+    owner: User,
+    db: AsyncSession,
+    limit: int = 8,
+) -> list[dict]:
+    normalized_terms = [
+        normalize_text(term)
+        for term in terms
+        if normalize_text(term)
+    ]
+
+    if not normalized_terms:
+        return []
+
+    result = await db.execute(
+        select(ResourceTerm, Resource.title)
+        .join(Resource, Resource.id == ResourceTerm.resource_id)
+        .where(ResourceTerm.created_by_id == owner.id)
+        .where(ResourceTerm.is_active.is_(True))
+        .where(ResourceTerm.normalized_term.in_(normalized_terms))
+        .where(Resource.is_active.is_(True))
+        .where(Resource.is_indexed.is_(True))
+        .limit(limit)
+    )
+
+    return [
+        {
+            "term": resource_term.term,
+            "normalized_term": resource_term.normalized_term,
+            "resource_id": resource_term.resource_id,
+            "chunk_id": resource_term.resource_chunk_id,
+            "resource_title": resource_title,
+            "resource_type": resource_term.term_type,
+            "content": resource_term.source_text,
+        }
+        for resource_term, resource_title in result.all()
+    ]
 
 
 def extract_candidate_terms(message: str) -> list[str]:
     """
     Extract identity-sensitive values only.
 
-    General language remains a normal RAG question. The extracted values are
-    verified against the current tenant's resource_terms catalogue.
+    General language remains a normal RAG question. Extracted values are
+    deterministically verified against the current tenant's resource catalogue.
     """
     terms: list[str] = []
 
@@ -156,71 +300,6 @@ def extract_candidate_terms(message: str) -> list[str]:
     return unique_terms[:8]
 
 
-async def get_pending_action(
-    conversation: ChatConversation,
-    api_key: ApiKey,
-    db: AsyncSession,
-) -> ConversationPendingAction | None:
-    result = await db.execute(
-        select(ConversationPendingAction)
-        .where(
-            ConversationPendingAction.conversation_id == conversation.id,
-            ConversationPendingAction.api_key_id == api_key.id,
-            ConversationPendingAction.status == PENDING_STATUS,
-        )
-        .order_by(ConversationPendingAction.id.desc())
-        .limit(1)
-    )
-    pending = result.scalar_one_or_none()
-
-    if pending and pending.expires_at <= datetime.utcnow():
-        pending.status = EXPIRED_STATUS
-        pending.resolved_at = datetime.utcnow()
-        return None
-
-    return pending
-
-
-async def exact_search(
-    terms: list[str],
-    owner: User,
-    db: AsyncSession,
-    limit: int = 8,
-) -> list[dict]:
-    normalized_terms = [
-        normalize_text(term)
-        for term in terms
-        if normalize_text(term)
-    ]
-
-    if not normalized_terms:
-        return []
-
-    result = await db.execute(
-        select(ResourceTerm, Resource.title)
-        .join(Resource, Resource.id == ResourceTerm.resource_id)
-        .where(ResourceTerm.created_by_id == owner.id)
-        .where(ResourceTerm.is_active.is_(True))
-        .where(ResourceTerm.normalized_term.in_(normalized_terms))
-        .where(Resource.is_active.is_(True))
-        .where(Resource.is_indexed.is_(True))
-        .limit(limit)
-    )
-
-    return [
-        {
-            "term": resource_term.term,
-            "normalized_term": resource_term.normalized_term,
-            "resource_id": resource_term.resource_id,
-            "chunk_id": resource_term.resource_chunk_id,
-            "resource_title": resource_title,
-            "resource_type": resource_term.term_type,
-            "content": resource_term.source_text,
-        }
-        for resource_term, resource_title in result.all()
-    ]
-
-
 def pick_unverified_term(
     terms: list[str],
     exact_matches: list[dict],
@@ -243,9 +322,9 @@ async def find_close_candidate(
     db: AsyncSession,
 ) -> dict | None:
     """
-    Return a candidate only if there is exactly one distinct verified term.
+    Return a candidate only when exactly one distinct verified tenant term exists.
 
-    Similarity only suggests a clarification. It never authorizes an answer.
+    Similarity can request clarification only; it can never authorize an answer.
     """
     normalized_requested_term = normalize_text(requested_term)
 
@@ -290,10 +369,7 @@ async def find_close_candidate(
 
     candidates = list(candidates_by_term.values())
 
-    if len(candidates) != 1:
-        return None
-
-    return candidates[0]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 async def save_pending_clarification(
@@ -332,17 +408,10 @@ async def save_pending_clarification(
 
 
 async def resolve_pending_clarification(
-    message: str,
-    conversation: ChatConversation,
-    api_key: ApiKey,
-    db: AsyncSession,
+    intent: ClassifierIntent,
+    pending: ConversationPendingAction,
 ) -> PreRagDecision | None:
-    pending = await get_pending_action(conversation, api_key, db)
-
-    if not pending:
-        return None
-
-    if looks_like_confirmation(message):
+    if intent == "confirmation_accepted":
         pending.status = CONFIRMED_STATUS
         pending.resolved_at = datetime.utcnow()
 
@@ -358,9 +427,10 @@ async def resolve_pending_clarification(
             action=ANSWER,
             retrieval_query=corrected_query,
             candidate_term=pending.candidate_term,
+            intent=intent,
         )
 
-    if looks_like_rejection(message):
+    if intent == "confirmation_rejected":
         pending.status = REJECTED_STATUS
         pending.resolved_at = datetime.utcnow()
 
@@ -370,10 +440,13 @@ async def resolve_pending_clarification(
                 f"I do not have information about {pending.uncertain_term}. "
                 "Please provide the spelling or a little more context."
             ),
+            intent=intent,
         )
 
-    pending.status = CANCELLED_STATUS
-    pending.resolved_at = datetime.utcnow()
+    if intent == "resource_question":
+        pending.status = CANCELLED_STATUS
+        pending.resolved_at = datetime.utcnow()
+
     return None
 
 
@@ -382,26 +455,58 @@ async def decide_pre_rag_action(
     conversation: ChatConversation,
     api_key: ApiKey,
     owner: User,
-    semantic_matches: list[dict],
     db: AsyncSession,
+    openai_key: str,
+    model: str,
 ) -> PreRagDecision:
-    pending_decision = await resolve_pending_clarification(
+    pending = await get_pending_action(conversation, api_key, db)
+
+    intent = await classify_visitor_message(
         message=message,
-        conversation=conversation,
-        api_key=api_key,
-        db=db,
+        pending=pending,
+        openai_key=openai_key,
+        model=model,
     )
 
-    if pending_decision:
-        return pending_decision
+    if pending:
+        pending_decision = await resolve_pending_clarification(intent, pending)
 
-    if requests_human(message):
+        if pending_decision:
+            return pending_decision
+
+        if intent == "unclear":
+            return PreRagDecision(
+                action=CLARIFY,
+                message=(
+                    f"Please confirm whether you meant {pending.candidate_term}, "
+                    "or provide the correct spelling."
+                ),
+                candidate_term=pending.candidate_term,
+                intent=intent,
+            )
+
+    if intent == "greeting":
+        return PreRagDecision(
+            action=ANSWER,
+            message=GREETING_MESSAGE,
+            intent=intent,
+        )
+
+    if intent == "human_request":
+        return PreRagDecision(
+            action=HANDOFF,
+            message=(
+                "I can help arrange a follow-up. "
+                "Please share your email address and a team member can contact you."
+            ),
+            intent=intent,
+        )
+
+    if intent != "resource_question":
         return PreRagDecision(
             action=NOT_FOUND,
-            message=(
-                "I’m unable to connect you with a person right now. "
-                "Please leave your email if you would like a follow-up."
-            ),
+            message="Could you rephrase your question with a little more detail?",
+            intent=intent,
         )
 
     terms = extract_candidate_terms(message)
@@ -438,6 +543,7 @@ async def decide_pre_rag_action(
                     f"Did you mean {candidate['term']}?"
                 ),
                 candidate_term=candidate["term"],
+                intent=intent,
             )
 
         return PreRagDecision(
@@ -446,27 +552,41 @@ async def decide_pre_rag_action(
                 f"I do not have verified information about {unverified_term}. "
                 "Please check the spelling or provide more context."
             ),
-        )
-
-    if not semantic_matches:
-        return PreRagDecision(
-            action=NOT_FOUND,
-            message="I do not have enough information in the available resources to answer that.",
-        )
-
-    best_score = max(
-        float(match.get("score", 0))
-        for match in semantic_matches
-    )
-
-    if best_score < 0.70:
-        return PreRagDecision(
-            action=NOT_FOUND,
-            message="I do not have enough information in the available resources to answer that.",
+            intent=intent,
         )
 
     return PreRagDecision(
         action=ANSWER,
         retrieval_query=message,
         evidence=exact_matches,
+        intent=intent,
     )
+
+
+def apply_semantic_policy(
+    decision: PreRagDecision,
+    semantic_matches: list[dict],
+) -> PreRagDecision:
+    """
+    Deterministic final RAG policy after embeddings/vector retrieval completes.
+    """
+    if decision.action != ANSWER or not decision.retrieval_query:
+        return decision
+
+    if not semantic_matches:
+        return PreRagDecision(
+            action=NOT_FOUND,
+            message="I do not have enough information in the available resources to answer that.",
+            intent=decision.intent,
+        )
+
+    best_score = max(float(match.get("score", 0)) for match in semantic_matches)
+
+    if best_score < 0.70:
+        return PreRagDecision(
+            action=NOT_FOUND,
+            message="I do not have enough information in the available resources to answer that.",
+            intent=decision.intent,
+        )
+
+    return decision
