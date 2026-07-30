@@ -34,7 +34,6 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 CONTACT_TOOL_NAME = "save_visitor_contact"
-HANDOFF_TOOL_NAME = "request_human_handoff"
 
 CONTACT_TOOLS = [
     {
@@ -49,20 +48,6 @@ CONTACT_TOOLS = [
                     "email": {"type": "string"},
                     "phone": {"type": "string"},
                     "notes": {"type": "string"},
-                },
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": HANDOFF_TOOL_NAME,
-            "description": "Mark this conversation as needing a human reply.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {"type": "string"},
                 },
                 "additionalProperties": False,
             },
@@ -347,8 +332,6 @@ def build_system_prompt(api_key: ApiKey, context_text: str, visitor: Visitor) ->
                 "Do not ask for contact details after ordinary company, service, skill, or about questions. "
                 "Ask for contact details only after clear buying intent, quote requests, project requests, callback requests, "
                 "or support follow-up requests. "
-                f"If the visitor asks for a human, agent, callback, sales follow-up, support escalation, "
-                f"or manual help, use the {HANDOFF_TOOL_NAME} tool."
             ),
         ]
     )
@@ -598,22 +581,6 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": "Visitor contact information was saved.",
-                    }
-                )
-
-            elif tool_call.function.name == HANDOFF_TOOL_NAME:
-                try:
-                    payload = json.loads(tool_call.function.arguments or "{}")
-                except ValueError:
-                    payload = {}
-
-                apply_handoff_request(conversation, visitor, payload)
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": "Human handoff was requested.",
                     }
                 )
 

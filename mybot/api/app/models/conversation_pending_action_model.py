@@ -15,7 +15,6 @@ class ConversationPendingAction(Base):
     conversation_id: Mapped[int] = mapped_column(
         ForeignKey("chat_conversations.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
         index=True,
     )
 
