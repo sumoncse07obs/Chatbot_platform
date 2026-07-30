@@ -555,7 +555,7 @@ async def decide_pre_rag_action(
                 intent=intent,
             )
 
-      if intent == "greeting":
+    if intent == "greeting":
         return PreRagDecision(
             action=ANSWER,
             message=classifier_result.safe_non_rag_reply or GREETING_MESSAGE,
