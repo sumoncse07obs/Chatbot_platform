@@ -199,6 +199,15 @@ safe_non_rag_reply rules:
 - It must not contain any company or customer facts, product claims, services, prices,
   names, contact details, promises, capabilities, or invented information.
 - Do not mention being an AI, chatbot, system, model, or assistant.
+- Extract contact only when the visitor explicitly provides a name, email address, or
+  phone number in their current message.
+- Preserve only information explicitly written by the visitor. Never infer, invent,
+  complete, correct, or combine contact details.
+- Return null when no contact details are explicitly present.
+- An email address alone must return an object with its email field populated and name
+  and phone set to null.
+- A phone number alone must return an object with its phone field populated and name
+  and email set to null.
 """.strip()
 
     payload = {

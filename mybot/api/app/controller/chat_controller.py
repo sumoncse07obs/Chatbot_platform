@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 
 from fastapi import HTTPException
@@ -112,6 +113,13 @@ def clean_text(value: str | None, max_length: int) -> str | None:
 
     return cleaned[:max_length]
 
+def extract_email_from_message(message: str) -> str | None:
+    match = re.search(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        message,
+        flags=re.IGNORECASE,
+    )
+    return match.group(0) if match else None
 
 def serialize_visitor(visitor: Visitor | None) -> dict | None:
     if visitor is None:
@@ -490,6 +498,11 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
     )
     db.add(user_message)
     await db.flush()
+
+    explicit_email = extract_email_from_message(data.message)
+
+    if explicit_email:
+        apply_visitor_patch(visitor, {"email": explicit_email})
 
     decision = await decide_pre_rag_action(
         message=data.message,
