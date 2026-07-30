@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ CANCELLED_STATUS = "cancelled"
 EXPIRED_STATUS = "expired"
 
 GREETING_MESSAGE = "Hi! How can I help you today?"
+GENERIC_FOLLOW_UP_MESSAGE = "How can I help you today?"
 
 ClassifierIntent = Literal[
     "greeting",
@@ -85,10 +86,8 @@ async def classify_visitor_message(
     model: str,
 ) -> ClassifierIntent:
     """
-    Classifies message intent only.
-
-    This model call is never permitted to answer the visitor, decide which
-    resource is correct, produce company facts, or override database policy.
+    Return intent JSON only. The model cannot answer, retrieve, validate terms,
+    create facts, or override deterministic backend policy.
     """
     pending_context = None
 
@@ -122,29 +121,72 @@ async def classify_visitor_message(
         },
     }
 
-    system_prompt = (
-        "You are a narrowly scoped intent classifier for a SaaS website chat. "
-        "Return JSON that matches the supplied schema and nothing else. "
-        "Never answer the visitor's question. Never provide or infer company facts. "
-        "Never choose, correct, validate, or invent a candidate term. "
-        "Use confirmation_accepted only when pending clarification context exists and "
-        "the visitor clearly confirms the verified candidate term, including natural "
-        "language such as 'yes I mean Sumon' or 'yes, I meant Sumon'. "
-        "Use confirmation_rejected only when pending clarification context exists and "
-        "the visitor clearly rejects that candidate. "
-        "Use greeting for a social greeting with no factual company-resource question. "
-        "Use human_request when the visitor asks to speak with, contact, or be helped "
-        "by a person. Use resource_question for factual questions that need information "
-        "from the company's verified resources. Use unclear when none applies."
-    )
+    system_prompt = """
+You are a strictly limited intent classifier for a SaaS website chatbot.
 
-    user_payload = {
+Return only JSON that matches the provided schema. Do not write prose.
+
+You are NOT an assistant answering the visitor. You must never:
+- answer a question;
+- provide customer, company, product, service, pricing, support, or resource facts;
+- infer, correct, validate, select, or invent a person, product, identifier, or candidate term;
+- make a retrieval or handoff decision;
+- add fields not included in the JSON schema.
+
+Choose exactly one intent using these mandatory rules, in priority order:
+
+1. confirmation_accepted
+Use this ONLY when pending_clarification is present AND the visitor clearly confirms
+that the verified candidate term is what they meant. Natural language confirmation is
+valid, including affirmative wording together with a correction or restatement.
+
+2. confirmation_rejected
+Use this ONLY when pending_clarification is present AND the visitor clearly rejects
+the verified candidate term.
+
+3. human_request
+Use when the visitor asks to speak with, contact, be called by, or receive help from
+a human, person, representative, agent, support team, or sales team.
+
+4. resource_question
+Use for a factual question that requires verified company resources to answer.
+This includes questions about a company, its services, products, people, skills,
+pricing, policies, documentation, support, or other factual business information.
+
+5. greeting
+Use ONLY when the current message itself is a greeting or greeting-plus-social opener,
+and it contains no factual company-resource question.
+A greeting is an opening salutation such as hello, hi, good morning, good afternoon,
+good evening, or good day.
+
+6. unclear
+Use for everything else, including acknowledgments, thanks, status replies, short
+social follow-ups, incomplete text, and ambiguous messages.
+
+Critical greeting restrictions:
+- Do NOT classify a message as greeting merely because it is polite or conversational.
+- Acknowledgments and social follow-ups are ALWAYS unclear, not greeting.
+- Status replies such as being well, being fine, being okay, or being good are unclear.
+- Thanks, appreciation, agreement, acknowledgments, and short replies are unclear.
+- A message that asks how the assistant is without an actual greeting is unclear.
+
+Critical pending-clarification restrictions:
+- If pending_clarification is absent, confirmation_accepted and confirmation_rejected
+  are forbidden. Use unclear, greeting, human_request, or resource_question instead.
+- The pending candidate is verified context only. Do not decide whether it is factually
+  correct beyond classifying whether the visitor accepts or rejects it.
+
+When uncertain, choose unclear.
+""".strip()
+
+    payload = {
         "message": message,
         "pending_clarification": pending_context,
     }
 
     try:
         client = AsyncOpenAI(api_key=openai_key)
+
         response = await client.chat.completions.create(
             model=model,
             temperature=0,
@@ -157,7 +199,7 @@ async def classify_visitor_message(
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
-                    "content": json.dumps(user_payload, ensure_ascii=False),
+                    "content": json.dumps(payload, ensure_ascii=False),
                 },
             ],
         )
@@ -176,59 +218,18 @@ async def classify_visitor_message(
 
         if intent in allowed_intents:
             return intent
-    except (ValueError, json.JSONDecodeError, KeyError, IndexError):
+
+    except (OpenAIError, ValueError, json.JSONDecodeError, KeyError, IndexError):
         pass
 
-    # Fail closed: a classifier failure can never authorize an answer.
+    # Fail closed. A classifier problem must never authorize a factual answer.
     return "unclear"
-
-
-async def exact_search(
-    terms: list[str],
-    owner: User,
-    db: AsyncSession,
-    limit: int = 8,
-) -> list[dict]:
-    normalized_terms = [
-        normalize_text(term)
-        for term in terms
-        if normalize_text(term)
-    ]
-
-    if not normalized_terms:
-        return []
-
-    result = await db.execute(
-        select(ResourceTerm, Resource.title)
-        .join(Resource, Resource.id == ResourceTerm.resource_id)
-        .where(ResourceTerm.created_by_id == owner.id)
-        .where(ResourceTerm.is_active.is_(True))
-        .where(ResourceTerm.normalized_term.in_(normalized_terms))
-        .where(Resource.is_active.is_(True))
-        .where(Resource.is_indexed.is_(True))
-        .limit(limit)
-    )
-
-    return [
-        {
-            "term": resource_term.term,
-            "normalized_term": resource_term.normalized_term,
-            "resource_id": resource_term.resource_id,
-            "chunk_id": resource_term.resource_chunk_id,
-            "resource_title": resource_title,
-            "resource_type": resource_term.term_type,
-            "content": resource_term.source_text,
-        }
-        for resource_term, resource_title in result.all()
-    ]
 
 
 def extract_candidate_terms(message: str) -> list[str]:
     """
-    Extract identity-sensitive values only.
-
-    General language remains a normal RAG question. Extracted values are
-    deterministically verified against the current tenant's resource catalogue.
+    Extract identity-sensitive values only. Extracted terms are subsequently
+    verified only against the current tenant's resource-term catalogue.
     """
     terms: list[str] = []
 
@@ -300,6 +301,46 @@ def extract_candidate_terms(message: str) -> list[str]:
     return unique_terms[:8]
 
 
+async def exact_search(
+    terms: list[str],
+    owner: User,
+    db: AsyncSession,
+    limit: int = 8,
+) -> list[dict]:
+    normalized_terms = [
+        normalize_text(term)
+        for term in terms
+        if normalize_text(term)
+    ]
+
+    if not normalized_terms:
+        return []
+
+    result = await db.execute(
+        select(ResourceTerm, Resource.title)
+        .join(Resource, Resource.id == ResourceTerm.resource_id)
+        .where(ResourceTerm.created_by_id == owner.id)
+        .where(ResourceTerm.is_active.is_(True))
+        .where(ResourceTerm.normalized_term.in_(normalized_terms))
+        .where(Resource.is_active.is_(True))
+        .where(Resource.is_indexed.is_(True))
+        .limit(limit)
+    )
+
+    return [
+        {
+            "term": resource_term.term,
+            "normalized_term": resource_term.normalized_term,
+            "resource_id": resource_term.resource_id,
+            "chunk_id": resource_term.resource_chunk_id,
+            "resource_title": resource_title,
+            "resource_type": resource_term.term_type,
+            "content": resource_term.source_text,
+        }
+        for resource_term, resource_title in result.all()
+    ]
+
+
 def pick_unverified_term(
     terms: list[str],
     exact_matches: list[dict],
@@ -322,9 +363,7 @@ async def find_close_candidate(
     db: AsyncSession,
 ) -> dict | None:
     """
-    Return a candidate only when exactly one distinct verified tenant term exists.
-
-    Similarity can request clarification only; it can never authorize an answer.
+    Similarity can only suggest a clarification; it never authorizes an answer.
     """
     normalized_requested_term = normalize_text(requested_term)
 
@@ -502,10 +541,17 @@ async def decide_pre_rag_action(
             intent=intent,
         )
 
+    if intent == "unclear":
+        return PreRagDecision(
+            action=ANSWER,
+            message=GENERIC_FOLLOW_UP_MESSAGE,
+            intent=intent,
+        )
+
     if intent != "resource_question":
         return PreRagDecision(
             action=NOT_FOUND,
-            message="Could you rephrase your question with a little more detail?",
+            message="I do not have enough information to answer that.",
             intent=intent,
         )
 
@@ -568,7 +614,7 @@ def apply_semantic_policy(
     semantic_matches: list[dict],
 ) -> PreRagDecision:
     """
-    Deterministic final RAG policy after embeddings/vector retrieval completes.
+    Deterministic final policy after tenant-scoped vector retrieval.
     """
     if decision.action != ANSWER or not decision.retrieval_query:
         return decision
