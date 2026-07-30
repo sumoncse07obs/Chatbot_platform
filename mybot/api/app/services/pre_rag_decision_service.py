@@ -29,6 +29,8 @@ EXPIRED_STATUS = "expired"
 
 GREETING_MESSAGE = "Hi! How can I help you today?"
 GENERIC_FOLLOW_UP_MESSAGE = "How can I help you today?"
+MIN_SEMANTIC_SCORE = 0.35
+
 
 ClassifierIntent = Literal[
     "greeting",
@@ -164,8 +166,15 @@ candidate term.
 The visitor asks for a human, person, representative, call, contact, sales, or support.
 
 4. resource_question:
-The visitor asks for factual company-related information. This includes questions about
-services, products, people, skills, pricing, policies, support, documentation, or facts.
+Use this for any factual question that could require company resources, including short,
+informal, incomplete, misspelled, or conversational wording. This includes questions
+about services, products, people, skills, pricing, policies, support, documentation,
+technologies, and company identity.
+
+Treat a short question about a named company, person, product, technology, or service
+as resource_question when it is asking whether you know about it or requesting factual
+information. Do not classify such questions as unclear merely because the wording is
+informal, abbreviated, lower-case, or grammatically incomplete.
 
 5. greeting:
 The current message itself is an opening salutation and has no factual company question.
@@ -662,7 +671,7 @@ def apply_semantic_policy(
 
     best_score = max(float(match.get("score", 0)) for match in semantic_matches)
 
-    if best_score < 0.70:
+    if best_score < MIN_SEMANTIC_SCORE:
         return PreRagDecision(
             action=NOT_FOUND,
             message="I do not have enough information in the available resources to answer that.",
