@@ -38,6 +38,7 @@ class ChatResourceMatch(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
+    decision: str = "ANSWER"
     api_key_id: int
     conversation_id: int
     display_name: Optional[str] = None

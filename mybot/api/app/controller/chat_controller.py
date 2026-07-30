@@ -14,6 +14,11 @@ from app.models.resource_chunk_model import ResourceChunk
 from app.models.resource_model import Resource
 from app.models.user_model import User
 from app.models.visitor_model import Visitor
+from app.services.pre_rag_decision_service import (
+    ANSWER,
+    HANDOFF,
+    decide_pre_rag_action,
+)
 from app.schemas.chat_schema import ChatRequest, ChatVisitorPatch
 from app.services.embedding_service import create_embedding
 from app.services.secret_crypto import decrypt_secret
@@ -220,85 +225,8 @@ def apply_handoff_request(
     apply_visitor_patch(visitor, {"notes": note})
 
 
-def is_business_profile_question(message: str) -> bool:
-    normalized = " ".join(message.lower().strip().split())
-
-    phrases = [
-        "about you",
-        "about your company",
-        "tell me about you",
-        "tell me about yourself",
-        "tell me about your company",
-        "who are you",
-        "what are you",
-        "what do you do",
-        "what does your company do",
-        "what can you do",
-        "what can your company do",
-        "what services do you offer",
-        "what service do you offer",
-        "what are your services",
-        "what is your skill",
-        "what are your skills",
-        "what do you specialize in",
-        "what does sumon specialize in",
-        "what is tomadev",
-        "who is sumon",
-    ]
-
-    keywords = [
-        "service",
-        "services",
-        "offer",
-        "offers",
-        "skill",
-        "skills",
-        "specialize",
-        "specializes",
-        "specialization",
-        "about",
-        "company",
-        "business",
-        "solution",
-        "solutions",
-        "feature",
-        "features",
-        "pricing",
-        "price",
-        "plans",
-        "support",
-        "setup",
-        "crm",
-        "api",
-        "chatbot",
-        "rag",
-        "agent",
-        "automation",
-        "dashboard",
-        "saas",
-        "tomadev",
-        "sumon",
-    ]
-
-    return any(phrase in normalized for phrase in phrases) or any(keyword in normalized for keyword in keywords)
 
 
-
-def build_retrieval_query(message: str) -> str:
-    if is_business_profile_question(message):
-        return (
-            f"{message}\n\n"
-            "Retrieve indexed company profile, about, services, skills, specializations, and offers. "
-            "Relevant resource titles may include: About Sumon, What does Sumon specialize in, "
-            "What is TomaDev, What services does TomaDev offer, Can you build AI agents, "
-            "Can your chatbot connect with my CRM, Can your chatbot capture leads. "
-            "Relevant details may include: AI Chatbot Development, RAG Chatbots, AI Agent Development, "
-            "SaaS Development, CRM Integration, API Development, Dashboard Development, "
-            "AI Workflow Automation, Custom Business Software, FastAPI, React, TypeScript, PostgreSQL, "
-            "and OpenAI Integration."
-        )
-
-    return message
 
 
 async def retrieve_context(
@@ -330,6 +258,7 @@ async def retrieve_context(
     return [
         {
             "resource_id": chunk.resource_id,
+            "chunk_id": chunk.id,
             "resource_title": resource_title,
             "resource_type": resource_type,
             "content": chunk.content,
@@ -338,119 +267,6 @@ async def retrieve_context(
         for chunk, resource_title, resource_type, distance_value in result.all()
     ]
 
-
-async def load_business_profile_context(
-    owner: User,
-    db: AsyncSession,
-    limit: int = 10,
-) -> list[dict]:
-    terms = [
-        "about sumon",
-        "sumon specialize",
-        "what is tomadev",
-        "services does tomadev offer",
-        "service",
-        "services",
-        "offer",
-        "offers",
-        "specialize",
-        "specializes",
-        "skill",
-        "skills",
-        "solution",
-        "solutions",
-        "feature",
-        "features",
-        "business",
-        "company",
-        "support",
-        "pricing",
-        "setup",
-        "crm",
-        "api",
-        "chatbot",
-        "rag",
-        "agent",
-        "automation",
-        "dashboard",
-        "saas",
-        "fastapi",
-        "react",
-        "typescript",
-        "postgresql",
-        "openai",
-        "tomadev",
-        "sumon",
-    ]
-
-    term_filters = []
-
-    for term in terms:
-        pattern = f"%{term}%"
-        term_filters.append(Resource.title.ilike(pattern))
-        term_filters.append(Resource.resource_type.ilike(pattern))
-        term_filters.append(ResourceChunk.content.ilike(pattern))
-
-    priority = case(
-        (Resource.title.ilike("%what services does tomadev offer%"), 0),
-        (Resource.title.ilike("%what does sumon specialize in%"), 1),
-        (Resource.title.ilike("%about sumon%"), 2),
-        (Resource.title.ilike("%what is tomadev%"), 3),
-        (Resource.title.ilike("%can you build ai agents%"), 4),
-        (Resource.title.ilike("%crm%"), 5),
-        (Resource.title.ilike("%capture leads%"), 6),
-        (ResourceChunk.content.ilike("%AI Chatbot Development%"), 7),
-        (ResourceChunk.content.ilike("%RAG Chatbots%"), 8),
-        (ResourceChunk.content.ilike("%AI Agent Development%"), 9),
-        (ResourceChunk.content.ilike("%SaaS Development%"), 10),
-        (ResourceChunk.content.ilike("%CRM Integration%"), 11),
-        else_=30,
-    )
-
-    result = await db.execute(
-        select(
-            ResourceChunk,
-            Resource.title.label("resource_title"),
-            Resource.resource_type.label("resource_type"),
-        )
-        .join(Resource, Resource.id == ResourceChunk.resource_id)
-        .where(Resource.created_by_id == owner.id)
-        .where(Resource.is_active.is_(True))
-        .where(Resource.is_indexed.is_(True))
-        .where(ResourceChunk.embedding.is_not(None))
-        .where(or_(*term_filters))
-        .order_by(priority, ResourceChunk.chunk_index.asc(), Resource.id.asc())
-        .limit(limit)
-    )
-
-    return [
-        {
-            "resource_id": chunk.resource_id,
-            "resource_title": resource_title,
-            "resource_type": resource_type,
-            "content": chunk.content,
-            "score": 1.0,
-        }
-        for chunk, resource_title, resource_type in result.all()
-    ]
-
-def merge_context_matches(primary: list[dict], secondary: list[dict], limit: int) -> list[dict]:
-    merged = []
-    seen = set()
-
-    for match in [*primary, *secondary]:
-        key = (match.get("resource_id"), match.get("content", "")[:160])
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        merged.append(match)
-
-        if len(merged) >= limit:
-            break
-
-    return merged
 
 
 def build_context_text(matches: list[dict]) -> str:
@@ -498,9 +314,13 @@ def build_system_prompt(api_key: ApiKey, context_text: str, visitor: Visitor) ->
                 "Never describe yourself as a chatbot, AI, RAG chatbot, language model, automated system, "
                 "knowledge base assistant, retrieval assistant, or virtual assistant. "
                 "Never mention retrieval, embeddings, vector search, chunks, tools, prompts, or internal systems. "
-                "For company, service, skill, feature, offer, pricing, setup, support, and about-you questions, "
-                "use only the company context below. Treat 'you', 'your skill', 'your skills', and 'about you' "
-                "as questions about Sumon, TomaDev, services, skills, technologies, and offers from the context. "
+                "For all factual questions about the current company, use only the retrieved company context below. "
+                "Do not assume a visitor's name, product, service, identifier, price, date, address, phone number, "
+                "email, or other important detail refers to a similar-looking value in the context. "
+                "Do not use general knowledge. Do not guess. Do not invent facts, services, prices, timelines, "
+                "guarantees, or experience that are not directly supported by the context. "
+                "If the context does not support the answer, say exactly: "
+                "'I do not have enough company information to answer that yet.'"
                 "When the context contains service or skill details, answer with those concrete details directly. "
                 "For 'what is your skill' or 'tell me about you', include the relevant services and technologies "
                 "from the context, such as AI Chatbot Development, RAG Chatbots, AI Agent Development, SaaS Development, "
@@ -632,6 +452,7 @@ async def persist_assistant_answer(
     owner: User,
     db: AsyncSession,
     matches: list[dict],
+    decision: str = ANSWER,
 ):
     assistant_message = ChatMessage(
         conversation_id=conversation.id,
@@ -653,6 +474,7 @@ async def persist_assistant_answer(
 
     return {
         "answer": answer,
+        "decision": decision,
         "api_key_id": api_key.id,
         "conversation_id": conversation.id,
         "display_name": api_key.display_name,
@@ -685,31 +507,61 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
     db.add(user_message)
     await db.flush()
 
-    retrieval_query = build_retrieval_query(data.message)
-
-    matches = await retrieve_context(
-        message=retrieval_query,
+    semantic_matches = await retrieve_context(
+        message=data.message,
         owner=owner,
         db=db,
         limit=data.limit,
         openai_key=openai_key,
     )
 
-    if is_business_profile_question(data.message):
-        business_matches = await load_business_profile_context(
+    decision = await decide_pre_rag_action(
+        message=data.message,
+        conversation=conversation,
+        api_key=api_key,
+        owner=owner,
+        semantic_matches=semantic_matches,
+        db=db,
+    )
+
+    if decision.action == HANDOFF:
+        apply_handoff_request(
+            conversation=conversation,
+            visitor=visitor,
+            payload={"reason": "Visitor requested human support."},
+        )
+        return await persist_assistant_answer(
+            answer=decision.message or "A support team member will follow up.",
+            conversation=conversation,
+            visitor=visitor,
+            api_key=api_key,
             owner=owner,
             db=db,
-            limit=8,
-        )
-        matches = merge_context_matches(
-            primary=business_matches,
-            secondary=matches,
-            limit=max(data.limit, 8),
+            matches=[],
+            decision=decision.action,
         )
 
-        if not matches:
-            answer = "I do not have enough company information to answer that yet."
-            return await persist_assistant_answer(answer, conversation, visitor, api_key, owner, db, [])
+    if decision.action != ANSWER:
+        return await persist_assistant_answer(
+            answer=decision.message or "I do not have enough information to answer that.",
+            conversation=conversation,
+            visitor=visitor,
+            api_key=api_key,
+            owner=owner,
+            db=db,
+            matches=[],
+            decision=decision.action,
+        )
+
+    effective_message = decision.retrieval_query or data.message
+
+    matches = await retrieve_context(
+        message=effective_message,
+        owner=owner,
+        db=db,
+        limit=data.limit,
+        openai_key=openai_key,
+    )
 
     system_prompt = build_system_prompt(
         api_key=api_key,
@@ -720,7 +572,7 @@ async def chat_with_api_key(data: ChatRequest, db: AsyncSession):
     messages = [
         {"role": "system", "content": system_prompt},
         *recent_messages,
-        {"role": "user", "content": data.message},
+        {"role": "user", "content": effective_message},
     ]
 
     client = AsyncOpenAI(api_key=openai_key)

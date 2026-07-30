@@ -6,11 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.controller.chat_controller import resolve_openai_key
 from app.models.resource_chunk_model import ResourceChunk
+from app.models.resource_term_model import ResourceTerm
 from app.models.resource_model import Resource
 from app.models.user_model import User
 from app.services.chunking_service import estimate_token_count, split_text_into_chunks
 from app.services.embedding_service import create_embedding, create_embeddings
 from app.services.resource_text_service import extract_resource_text
+from app.services.resource_term_service import extract_verified_terms
 from app.settings.dbdriver import settings
 
 
@@ -41,24 +43,39 @@ async def index_resource(resource_id: int, db: AsyncSession, current_user: User)
 
     embeddings = await create_embeddings(chunks, openai_key)
 
+    await db.execute(delete(ResourceTerm).where(ResourceTerm.resource_id == resource.id))
     await db.execute(delete(ResourceChunk).where(ResourceChunk.resource_id == resource.id))
 
     for index, chunk in enumerate(chunks):
-        db.add(
-            ResourceChunk(
-                resource_id=resource.id,
-                chunk_index=index,
-                content=chunk,
-                content_hash=hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
-                token_count=estimate_token_count(chunk),
-                embedding_model=settings.EMBEDDING_MODEL,
-                embedding=embeddings[index],
-                chunk_metadata={
-                    "resource_title": resource.title,
-                    "resource_type": resource.resource_type,
-                },
-            )
+        resource_chunk = ResourceChunk(
+            resource_id=resource.id,
+            chunk_index=index,
+            content=chunk,
+            content_hash=hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
+            token_count=estimate_token_count(chunk),
+            embedding_model=settings.EMBEDDING_MODEL,
+            embedding=embeddings[index],
+            chunk_metadata={
+                "resource_title": resource.title,
+                "resource_type": resource.resource_type,
+            },
         )
+        db.add(resource_chunk)
+        await db.flush()
+
+        for term_data in extract_verified_terms(chunk):
+            db.add(
+                ResourceTerm(
+                    created_by_id=current_user.id,
+                    resource_id=resource.id,
+                    resource_chunk_id=resource_chunk.id,
+                    term=term_data["term"],
+                    normalized_term=term_data["normalized_term"],
+                    term_type=term_data["term_type"],
+                    source_text=term_data["source_text"],
+                    is_active=True,
+                )
+            )
 
     resource.is_indexed = True
 
@@ -76,8 +93,9 @@ async def index_resource(resource_id: int, db: AsyncSession, current_user: User)
 async def deindex_resource(resource_id: int, db: AsyncSession, current_user: User):
     resource = await get_owned_resource(resource_id, db, current_user)
 
+    await db.execute(delete(ResourceTerm).where(ResourceTerm.resource_id == resource.id))
     await db.execute(delete(ResourceChunk).where(ResourceChunk.resource_id == resource.id))
-
+    
     resource.is_indexed = False
 
     await db.commit()

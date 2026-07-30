@@ -19,7 +19,10 @@ from app.models.resource_chunk_model import ResourceChunk  # noqa: F401
 from app.models.api_key_model import ApiKey  # noqa: F401
 from app.models.widget_install_model import WidgetInstall  # noqa: F401
 from app.models.chat_conversation_model import ChatConversation  # noqa: F401
+from app.models.visitor_model import Visitor  # noqa: F401
 from app.models.chat_message_model import ChatMessage  # noqa: F401
+from app.models.conversation_pending_action_model import ConversationPendingAction  # noqa: F401
+from app.models.resource_term_model import ResourceTerm  # noqa: F401
 
 config = context.config
 

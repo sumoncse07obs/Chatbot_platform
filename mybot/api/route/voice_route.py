@@ -73,7 +73,14 @@ async def transcribe_voice(
               file=audio_file,
           )
 
-      return {"text": transcription.text}
+      return {
+          "text": transcription.text,
+          "requires_user_review": True,
+          "review_hint": (
+              "Please review the transcript before sending, especially names, IDs, "
+              "dates, prices, phone numbers, emails, and addresses."
+          ),
+      }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Voice transcription failed: {exc}")
     finally:
