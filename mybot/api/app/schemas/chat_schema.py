@@ -21,7 +21,7 @@ class ChatVisitorResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     api_key: str
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=6000)
     external_user_id: Optional[str] = Field(default=None, max_length=150)
     conversation_id: Optional[str] = None
     visitor: Optional[ChatVisitorPatch] = None
