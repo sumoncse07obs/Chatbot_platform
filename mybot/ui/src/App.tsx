@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
-
+import HomePage from '@/components/public/HomePage';
 import LoginPage from '@/components/auth/login';
 import RegisterPage from '@/components/auth/register';
 import UnauthorizedPage from '@/components/auth/UnauthorizedPage';
@@ -30,11 +30,14 @@ import WidgetChatPage from '@/components/public/WidgetChatPage';
 
 import HistoryModule from '@/components/customer/module/history';
 import LeadsModule from '@/components/customer/module/leads';
+import AgentModule from '@/components/customer/module/agent';
+
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
+      <Route path="/" element={<HomePage />} />
+      <Route path="/home" element={<HomePage />} />
       <Route path="/widget" element={<WidgetChatPage />} />
       <Route
         path="/login"
@@ -87,9 +90,11 @@ export default function App() {
         <Route path="media/*" element={<MediaRoutes />} />
         <Route path="resources/*" element={<CustomerResourceRoutes />} />
         <Route path="apikeys/*" element={<ApiKeysModule />} />
+        <Route path="agent/*" element={<AgentModule />} />
         <Route path="widget-install/*" element={<WidgetInstallModule />} />
         <Route path="history/*" element={<HistoryModule />} />
         <Route path="leads/*" element={<LeadsModule />} />
+        
       </Route>
 
       <Route

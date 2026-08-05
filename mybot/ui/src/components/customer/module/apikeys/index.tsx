@@ -6,6 +6,7 @@ import {
   createApiKey,
   deleteApiKey,
   getApiKeys,
+  revealApiKey,
   rotateApiKey,
   updateApiKey,
 } from '@/components/customer/module/apikeys/api/apikeyapi';
@@ -87,6 +88,7 @@ export default function ApiKeysModule() {
   const [form, setForm] = useState<ApiKeyForm>(emptyForm);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [copyingId, setCopyingId] = useState<number | null>(null);
 
   const total = useMemo(() => items.length, [items]);
 
@@ -188,9 +190,28 @@ export default function ApiKeysModule() {
     }
   }
 
-  async function copyKey(item: ApiKeyItem) {
-    await navigator.clipboard.writeText(item.key_value || item.key_preview);
-    toast.success(item.key_value ? 'Full API key copied.' : 'Key preview copied.');
+  async function copyFullKey(item: ApiKeyItem) {
+    try {
+      setCopyingId(item.id);
+
+      const fullKey = item.key_value || (await revealApiKey(item.id)).key;
+
+      await navigator.clipboard.writeText(fullKey);
+
+      setItems((current) =>
+        current.map((entry) => (entry.id === item.id ? { ...entry, key_value: fullKey } : entry)),
+      );
+
+      setViewing((current) =>
+        current?.id === item.id ? { ...current, key_value: fullKey } : current,
+      );
+
+      toast.success('Full API key copied to clipboard.');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to copy full API key.');
+    } finally {
+      setCopyingId(null);
+    }
   }
 
   if (formMode) {
@@ -310,7 +331,7 @@ export default function ApiKeysModule() {
         <div>
           <h2 className="text-2xl font-black text-slate-950">API Keys</h2>
           <p className="mt-1 text-sm text-slate-600">
-            Each API key can have its own chatbot character while sharing the selected agent&apos;s resources.
+            Create keys, configure chatbot behavior, and securely copy the full key for your integration.
           </p>
         </div>
 
@@ -336,7 +357,7 @@ export default function ApiKeysModule() {
           <div className="py-10 text-center text-slate-500">Loading API keys...</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[880px] border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
                   <th className="p-4">Name</th>
@@ -372,14 +393,26 @@ export default function ApiKeysModule() {
 
                     <td className="p-4 align-middle">
                       <div className="flex justify-end gap-2">
+                        <button
+                          className={buttonClass}
+                          type="button"
+                          onClick={() => copyFullKey(item)}
+                          disabled={copyingId === item.id}
+                        >
+                          <Copy size={16} />
+                          {copyingId === item.id ? 'Copying...' : 'Copy Full Key'}
+                        </button>
+
                         <button className={buttonClass} type="button" onClick={() => setViewing(item)}>
                           <Eye size={16} />
                           View
                         </button>
+
                         <button className={buttonClass} type="button" onClick={() => openEdit(item)}>
                           <Pencil size={16} />
                           Edit
                         </button>
+
                         <button className={dangerButtonClass} type="button" onClick={() => deleteItem(item)}>
                           <Trash2 size={16} />
                           Delete
@@ -411,14 +444,21 @@ export default function ApiKeysModule() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <button className={buttonClass} type="button" onClick={() => copyKey(viewing)}>
+              <button
+                className={buttonClass}
+                type="button"
+                onClick={() => copyFullKey(viewing)}
+                disabled={copyingId === viewing.id}
+              >
                 <Copy size={16} />
-                Copy
+                {copyingId === viewing.id ? 'Copying...' : 'Copy Full Key'}
               </button>
+
               <button className={buttonClass} type="button" onClick={() => rotateKey(viewing)}>
                 <RotateCw size={16} />
                 Rotate
               </button>
+
               <button className={primaryButtonClass} type="button" onClick={() => openEdit(viewing)}>
                 <Pencil size={16} />
                 Edit
@@ -427,8 +467,16 @@ export default function ApiKeysModule() {
           </div>
 
           {viewing.key_value && (
-            <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm font-bold text-blue-900">
-              New key: {viewing.key_value}
+            <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+              <p className="text-xs font-extrabold uppercase tracking-wider text-blue-700">
+                Full API key
+              </p>
+              <code className="mt-2 block break-all text-sm font-bold text-blue-950">
+                {viewing.key_value}
+              </code>
+              <p className="mt-2 text-xs text-blue-700">
+                Keep this key private. Rotate it immediately if it is exposed.
+              </p>
             </div>
           )}
 

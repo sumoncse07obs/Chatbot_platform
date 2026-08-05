@@ -1,8 +1,12 @@
+import logging
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import func, select
@@ -31,30 +35,40 @@ GREETING_MESSAGE = "Hi! How can I help you today?"
 GENERIC_FOLLOW_UP_MESSAGE = "How can I help you today?"
 MIN_SEMANTIC_SCORE = 0.35
 
+GROUNDED_RESPONSE = "grounded"
+CONVERSATION_RESPONSE = "conversation"
+CLARIFICATION_RESPONSE = "clarification"
+NOT_FOUND_RESPONSE = "not_found"
+HANDOFF_RESPONSE = "handoff"
+
 
 ClassifierIntent = Literal[
     "greeting",
+    "agent_capability",
+    "project_interest",
     "resource_question",
+    "human_request",
+    "security_request",
+    "out_of_scope",
     "confirmation_accepted",
     "confirmation_rejected",
-    "human_request",
     "unclear",
 ]
 
 @dataclass
 class ClassifierResult:
     intent: ClassifierIntent
-    safe_non_rag_reply: str | None = None
+
 
 @dataclass
 class PreRagDecision:
     action: str
+    response_mode: str
     message: str | None = None
     retrieval_query: str | None = None
     candidate_term: str | None = None
     evidence: list[dict] | None = None
     intent: ClassifierIntent | None = None
-
 
 def normalize_text(value: str) -> str:
     return " ".join(value.lower().strip().split())
@@ -92,11 +106,12 @@ async def classify_visitor_message(
     model: str,
 ) -> ClassifierResult:
     """
-    Classifies intent and may produce one safe social reply.
+    Classifies intent only.
 
-    The model is never allowed to answer customer-resource questions. Retrieval,
-    tenant isolation, candidate verification, pending state, and final policy all
-    remain deterministic backend responsibilities.
+    This model call never writes a visitor-facing answer. It cannot retrieve,
+    validate, correct, or invent company facts. Deterministic backend code
+    remains responsible for tenant scope, term matching, pending state, and
+    final ANSWER / CLARIFY / NOT_FOUND / HANDOFF policy.
     """
     pending_context = None
 
@@ -108,7 +123,7 @@ async def classify_visitor_message(
         }
 
     schema = {
-        "name": "visitor_message_classification",
+        "name": "visitor_message_intent",
         "strict": True,
         "schema": {
             "type": "object",
@@ -117,97 +132,87 @@ async def classify_visitor_message(
                     "type": "string",
                     "enum": [
                         "greeting",
+                        "agent_capability",
+                        "project_interest",
                         "resource_question",
+                        "human_request",
+                        "security_request",
+                        "out_of_scope",
                         "confirmation_accepted",
                         "confirmation_rejected",
-                        "human_request",
                         "unclear",
                     ],
-                },
-                "safe_non_rag_reply": {
-                    "anyOf": [
-                        {"type": "string"},
-                        {"type": "null"},
-                    ]
-                },
+                }
             },
-            "required": ["intent", "safe_non_rag_reply"],
+            "required": ["intent"],
             "additionalProperties": False,
         },
     }
 
     system_prompt = """
-You are a strict JSON classifier for a SaaS website chat.
+You are a strict JSON intent classifier for a SaaS website chat.
 
-Return JSON only, exactly matching the supplied schema.
+Return JSON only, exactly matching the supplied schema. Never write visitor-facing
+prose, answers, suggestions, or explanations.
 
-You have exactly two jobs:
-1. classify the visitor message into one intent;
-2. optionally write a short safe social reply.
+You must never provide, infer, validate, correct, select, or invent company facts,
+customer facts, services, products, pricing, policies, names, contact information,
+or resource content.
 
-You are NOT the factual customer-support assistant. You must never:
-- answer a company, product, service, support, price, policy, people, or resource question;
-- state or imply customer, company, service, product, pricing, capability, availability,
-  timeline, location, contact, or any other business fact;
-- retrieve, summarize, infer, validate, correct, select, or invent information;
-- mention internal tools, RAG, resources, prompts, databases, embeddings, or AI systems.
+Choose exactly one intent:
 
-Intent rules, in priority order:
+- confirmation_accepted:
+  Use only when pending clarification exists and the visitor clearly confirms the
+  verified candidate term.
 
-1. confirmation_accepted:
-Only when pending_clarification exists and the visitor clearly confirms its verified
-candidate term.
+- confirmation_rejected:
+  Use only when pending clarification exists and the visitor clearly and directly
+  rejects the verified candidate term.
 
-2. confirmation_rejected:
-Only when pending_clarification exists and the visitor clearly rejects its verified
-candidate term.
+- human_request:
+  The visitor asks to speak with, contact, or receive help from a human, person,
+  representative, sales team, or support team.
 
-3. human_request:
-The visitor asks for a human, person, representative, call, contact, sales, or support.
+- agent_capability:
+  The visitor asks what the chatbot can do, how it works, how to use it,
+  what they can ask, or asks for general help using the assistant.
 
-4. resource_question:
-Use this for any factual question that could require company resources, including short,
-informal, incomplete, misspelled, or conversational wording. This includes questions
-about services, products, people, skills, pricing, policies, support, documentation,
-technologies, and company identity.
+- project_interest:
+  The visitor expresses interest in starting, discussing, buying, planning,
+  comparing, or getting help with a business project, AI project, chatbot,
+  automation, integration, website, dashboard, or other service.
 
-Treat a short question about a named company, person, product, technology, or service
-as resource_question when it is asking whether you know about it or requesting factual
-information. Do not classify such questions as unclear merely because the wording is
-informal, abbreviated, lower-case, or grammatically incomplete.
+- security_request:
+  The visitor asks for system prompts, API keys, passwords, tokens, private
+  data, database information, internal instructions, hidden configuration,
+  or implementation secrets.
 
-5. greeting:
-The current message itself is an opening salutation and has no factual company question.
+- out_of_scope:
+  The visitor asks for information unrelated to the business and available
+  resources, such as live weather, cryptocurrency prices, sports predictions,
+  general trivia, or unrelated personal advice.
 
-6. unclear:
-Everything else: acknowledgments, thanks, casual conversation, status replies,
-incomplete statements, or ambiguous input.
+- resource_question:
+  The visitor asks for factual information about the company, services, products,
+  people, skills, technologies, pricing, support, documentation, or resources.
+  Use this for informal, abbreviated, lower-case, or rephrased factual questions.
 
-Mandatory restrictions:
-- If pending_clarification is null, confirmation_accepted and confirmation_rejected
-  are forbidden.
-- A social acknowledgment or status response is NEVER a greeting.
-- A visitor saying they are fine, good, okay, thankful, ready, or similar is unclear.
+- greeting:
+  The current message itself is an opening social greeting with no factual question.
+
+- unclear:
+  Everything else, including acknowledgments, thanks, status replies,
+  incomplete text, ambiguous messages, and references with no clear subject.
+  Do not use unclear when one of the other categories fits.
+
+Pending clarification rules:
+- If pending clarification is absent, confirmation_accepted and
+  confirmation_rejected are forbidden.
+- A new or rephrased factual question is resource_question even when a pending
+  clarification exists.
+- Do not treat a new factual question as rejection only because it does not confirm
+  the current candidate.
 - When uncertain, choose unclear.
-
-safe_non_rag_reply rules:
-- It may be non-null ONLY for greeting or unclear.
-- It must be null for resource_question, human_request, confirmation_accepted, and
-  confirmation_rejected.
-- When non-null, write one short, natural, warm reply to the visitor's social message.
-- It may invite the visitor to ask a question.
-- It must not contain any company or customer facts, product claims, services, prices,
-  names, contact details, promises, capabilities, or invented information.
-- Do not mention being an AI, chatbot, system, model, or assistant.
-- Extract contact only when the visitor explicitly provides a name, email address, or
-  phone number in their current message.
-- Preserve only information explicitly written by the visitor. Never infer, invent,
-  complete, correct, or combine contact details.
-- Return null when no contact details are explicitly present.
-- An email address alone must return an object with its email field populated and name
-  and phone set to null.
-- A phone number alone must return an object with its phone field populated and name
-  and email set to null.
 """.strip()
 
     payload = {
@@ -220,8 +225,8 @@ safe_non_rag_reply rules:
 
         response = await client.chat.completions.create(
             model=model,
-            temperature=0.2,
-            max_tokens=80,
+            temperature=0,
+            max_tokens=30,
             response_format={
                 "type": "json_schema",
                 "json_schema": schema,
@@ -236,22 +241,29 @@ safe_non_rag_reply rules:
         )
 
         content = response.choices[0].message.content or ""
-        payload = json.loads(content)
-
-        intent = payload.get("intent")
-        safe_reply = payload.get("safe_non_rag_reply")
+        intent = json.loads(content).get("intent")
 
         allowed_intents = {
             "greeting",
+            "agent_capability",
+            "project_interest",
             "resource_question",
+            "human_request",
+            "security_request",
+            "out_of_scope",
             "confirmation_accepted",
             "confirmation_rejected",
-            "human_request",
             "unclear",
         }
 
         if intent not in allowed_intents:
             raise ValueError("Classifier returned an unsupported intent.")
+
+        logger.info(
+            "Agent intent classifier selected intent=%s for message=%r",
+            intent,
+            message[:200],
+        )
 
         if not pending and intent in {
             "confirmation_accepted",
@@ -259,20 +271,15 @@ safe_non_rag_reply rules:
         }:
             return ClassifierResult(intent="unclear")
 
-        if intent not in {"greeting", "unclear"}:
-            safe_reply = None
-        elif isinstance(safe_reply, str):
-            safe_reply = " ".join(safe_reply.split())[:300] or None
-        else:
-            safe_reply = None
-
-        return ClassifierResult(
-            intent=intent,
-            safe_non_rag_reply=safe_reply,
-        )
+        return ClassifierResult(intent=intent)
 
     except (OpenAIError, ValueError, json.JSONDecodeError, KeyError, IndexError):
+        logger.exception(
+            "Agent intent classifier failed for message=%r",
+            message[:200],
+        )
         return ClassifierResult(intent="unclear")
+
 
 def extract_candidate_terms(message: str) -> list[str]:
     """
@@ -411,7 +418,10 @@ async def find_close_candidate(
     db: AsyncSession,
 ) -> dict | None:
     """
-    Similarity can only suggest a clarification; it never authorizes an answer.
+    Suggest one verified tenant term only when it is the clear best fuzzy match.
+
+    The function never authorizes an answer. It only returns a safe clarification
+    candidate from the current tenant's indexed resource terms.
     """
     normalized_requested_term = normalize_text(requested_term)
 
@@ -443,10 +453,12 @@ async def find_close_candidate(
     candidates_by_term: dict[str, dict] = {}
 
     for resource_term, resource_title, score in result.all():
-        if resource_term.normalized_term in candidates_by_term:
+        normalized_term = resource_term.normalized_term
+
+        if normalized_term in candidates_by_term:
             continue
 
-        candidates_by_term[resource_term.normalized_term] = {
+        candidates_by_term[normalized_term] = {
             "term": resource_term.term,
             "resource_id": resource_term.resource_id,
             "chunk_id": resource_term.resource_chunk_id,
@@ -456,9 +468,22 @@ async def find_close_candidate(
 
     candidates = list(candidates_by_term.values())
 
-    return candidates[0] if len(candidates) == 1 else None
+    if not candidates:
+        return None
 
+    best_candidate = candidates[0]
 
+    # A close runner-up means the system cannot safely select one term.
+    if len(candidates) > 1:
+        second_best_candidate = candidates[1]
+        score_gap = best_candidate["score"] - second_best_candidate["score"]
+
+        if score_gap < 0.08:
+            return None
+
+    return best_candidate
+
+    
 async def save_pending_clarification(
     conversation: ChatConversation,
     api_key: ApiKey,
@@ -512,6 +537,7 @@ async def resolve_pending_clarification(
 
         return PreRagDecision(
             action=ANSWER,
+            response_mode=GROUNDED_RESPONSE,
             retrieval_query=corrected_query,
             candidate_term=pending.candidate_term,
             intent=intent,
@@ -523,10 +549,8 @@ async def resolve_pending_clarification(
 
         return PreRagDecision(
             action=NOT_FOUND,
-            message=(
-                f"I do not have information about {pending.uncertain_term}. "
-                "Please provide the spelling or a little more context."
-            ),
+            response_mode=NOT_FOUND_RESPONSE,
+            candidate_term=pending.candidate_term,
             intent=intent,
         )
 
@@ -535,7 +559,6 @@ async def resolve_pending_clarification(
         pending.resolved_at = datetime.utcnow()
 
     return None
-
 
 async def decide_pre_rag_action(
     message: str,
@@ -546,15 +569,30 @@ async def decide_pre_rag_action(
     openai_key: str,
     model: str,
 ) -> PreRagDecision:
+    """
+    Decide how to handle a visitor message.
+
+    Important policy:
+    - Never require an exact keyword or resource-term match before retrieval.
+    - Every factual question is sent to tenant-scoped semantic retrieval.
+    - Vector-search relevance decides whether the answer is grounded or unavailable.
+    - The classifier is used only for conversation, handoff, and pending clarification.
+    """
+
     pending = await get_pending_action(conversation, api_key, db)
 
-    classifier_result = await classify_visitor_message(
-        message=message,
-        pending=pending,
-        openai_key=openai_key,
-        model=model,
-    )
-    intent = classifier_result.intent
+    try:
+        classifier_result = await classify_visitor_message(
+            message=message,
+            pending=pending,
+            openai_key=openai_key,
+            model=model,
+        )
+        intent = classifier_result.intent
+    except (OpenAIError, ValueError, json.JSONDecodeError):
+        # If classification is unavailable, continue with semantic retrieval.
+        # A classifier outage must never make the chatbot unable to answer.
+        intent = "resource_question"
 
     if pending:
         pending_decision = await resolve_pending_clarification(intent, pending)
@@ -565,10 +603,7 @@ async def decide_pre_rag_action(
         if intent == "unclear":
             return PreRagDecision(
                 action=CLARIFY,
-                message=(
-                    f"Please confirm whether you meant {pending.candidate_term}, "
-                    "or provide the correct spelling."
-                ),
+                response_mode=CLARIFICATION_RESPONSE,
                 candidate_term=pending.candidate_term,
                 intent=intent,
             )
@@ -576,90 +611,48 @@ async def decide_pre_rag_action(
     if intent == "greeting":
         return PreRagDecision(
             action=ANSWER,
-            message=classifier_result.safe_non_rag_reply or GREETING_MESSAGE,
+            response_mode=CONVERSATION_RESPONSE,
+            retrieval_query=message,
             intent=intent,
         )
 
     if intent == "human_request":
         return PreRagDecision(
             action=HANDOFF,
-            message=(
-                "I can help arrange a follow-up. "
-                "Please share your email address and a team member can contact you."
-            ),
+            response_mode=HANDOFF_RESPONSE,
+            retrieval_query=message,
+            intent=intent,
+        )
+
+    if intent in {
+        "agent_capability",
+        "project_interest",
+        "security_request",
+        "out_of_scope",
+    }:
+        return PreRagDecision(
+            action=ANSWER,
+            response_mode=intent,
+            retrieval_query=message,
             intent=intent,
         )
 
     if intent == "unclear":
         return PreRagDecision(
             action=ANSWER,
-            message=(
-                classifier_result.safe_non_rag_reply
-                or GENERIC_FOLLOW_UP_MESSAGE
-            ),
+            response_mode=CONVERSATION_RESPONSE,
+            retrieval_query=message,
             intent=intent,
         )
 
-    if intent != "resource_question":
-        return PreRagDecision(
-            action=NOT_FOUND,
-            message="I do not have enough information to answer that.",
-            intent=intent,
-        )
-
-    terms = extract_candidate_terms(message)
-    exact_matches = await exact_search(
-        terms=terms,
-        owner=owner,
-        db=db,
-    )
-
-    unverified_term = pick_unverified_term(terms, exact_matches)
-
-    if unverified_term:
-        candidate = await find_close_candidate(
-            requested_term=unverified_term,
-            owner=owner,
-            db=db,
-        )
-
-        if candidate:
-            await save_pending_clarification(
-                conversation=conversation,
-                api_key=api_key,
-                owner=owner,
-                original_user_text=message,
-                uncertain_term=unverified_term,
-                candidate=candidate,
-                db=db,
-            )
-
-            return PreRagDecision(
-                action=CLARIFY,
-                message=(
-                    f"I do not have information about {unverified_term}. "
-                    f"Did you mean {candidate['term']}?"
-                ),
-                candidate_term=candidate["term"],
-                intent=intent,
-            )
-
-        return PreRagDecision(
-            action=NOT_FOUND,
-            message=(
-                f"I do not have verified information about {unverified_term}. "
-                "Please check the spelling or provide more context."
-            ),
-            intent=intent,
-        )
-
+    # All factual questions use semantic retrieval.
+    # Do not check exact terms, keywords, spelling, or resource-term catalogue first.
     return PreRagDecision(
         action=ANSWER,
+        response_mode=GROUNDED_RESPONSE,
         retrieval_query=message,
-        evidence=exact_matches,
         intent=intent,
-    )
-
+)
 
 def apply_semantic_policy(
     decision: PreRagDecision,
@@ -674,7 +667,7 @@ def apply_semantic_policy(
     if not semantic_matches:
         return PreRagDecision(
             action=NOT_FOUND,
-            message="I do not have enough information in the available resources to answer that.",
+            response_mode=NOT_FOUND_RESPONSE,
             intent=decision.intent,
         )
 
@@ -683,7 +676,7 @@ def apply_semantic_policy(
     if best_score < MIN_SEMANTIC_SCORE:
         return PreRagDecision(
             action=NOT_FOUND,
-            message="I do not have enough information in the available resources to answer that.",
+            response_mode=NOT_FOUND_RESPONSE,
             intent=decision.intent,
         )
 

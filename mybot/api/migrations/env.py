@@ -17,6 +17,7 @@ from app.models.media_model import Media  # noqa: F401
 from app.models.resource_model import Resource  # noqa: F401
 from app.models.resource_chunk_model import ResourceChunk  # noqa: F401
 from app.models.api_key_model import ApiKey  # noqa: F401
+from app.models.agent_profile_model import AgentProfile  # noqa: F401
 from app.models.widget_install_model import WidgetInstall  # noqa: F401
 from app.models.chat_conversation_model import ChatConversation  # noqa: F401
 from app.models.visitor_model import Visitor  # noqa: F401

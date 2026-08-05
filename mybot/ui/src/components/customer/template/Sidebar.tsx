@@ -16,6 +16,7 @@ import {
   UserRound,
   Bot,
   Pin,
+  Brain,
 } from 'lucide-react';
 
 interface Props {
@@ -51,6 +52,10 @@ export default function Sidebar({ isOpen }: Props) {
         <NavLink to="/customer/apikeys" className="guru-folder-item">
           <KeyRound size={16} />
           <span>API Keys</span>
+        </NavLink>
+        <NavLink to="/customer/agent" className="guru-folder-item">
+          <Brain size={16} />
+          <span>Agent Setup</span>
         </NavLink>
         <NavLink to="/customer/widget-install" className="guru-folder-item">
           <Pin size={16} />

@@ -13,16 +13,16 @@ from route.chat_history_route import router as chat_history_router
 from route.voice_route import router as voice_router
 from app.settings.cors import setup_cors
 from route.vapi_route import router as vapi_router
+from route.agent_profile_route import router as agent_profile_router
 
+#app = FastAPI(title="BotAPI")
 
-app = FastAPI(title="BotAPI")
-
-#app = FastAPI(
-#    title="BotAPI",
-#    docs_url=None,
-#    redoc_url=None,
-#    openapi_url=None,
-#)
+app = FastAPI(
+   title="BotAPI",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 setup_cors(app)
 
@@ -34,6 +34,7 @@ app.include_router(admin_router)
 app.include_router(media_router)
 app.include_router(resource_router)
 app.include_router(api_key_router)
+app.include_router(agent_profile_router)
 app.include_router(widget_install_router)
 app.include_router(chat_router)
 app.include_router(chat_history_router)

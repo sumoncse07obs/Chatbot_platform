@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int
 
     OPENAI_API_KEY: str = ""
-    CHAT_MODEL: str = "gpt-4o-mini"
+    CLASSIFIER_MODEL: str = "gpt-4o-mini"
+    ANSWER_MODEL: str = "gpt-5-mini"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSIONS: int = 1536
     OPENAI_KEY_ENCRYPTION_SECRET: str

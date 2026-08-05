@@ -4,7 +4,10 @@ protected/runtime/*
 !protected/runtime/.gitignore
 protected/data/*.db
 themes/classic/views/
-
+env/
+.env
+.env.*
+!.env.example
 
 # Frontend dependencies and build output
 chatbot1/ui/node_modules/

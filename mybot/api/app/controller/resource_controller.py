@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.controller.resource_index_controller import deindex_resource, index_resource
 from app.models.resource_model import Resource
+from app.models.api_key_model import ApiKey
 from app.models.user_model import User
+from app.services.agent_profile_service import generate_agent_profile
 from app.schemas.resource_schema import ResourceCreateRequest, ResourceUpdateRequest, ResourceUrlCreateRequest
 
 RESOURCE_UPLOAD_DIR = Path("storage/resources")
@@ -167,8 +169,46 @@ async def sync_resource_index(resource: Resource, db: AsyncSession, current_user
         await deindex_resource(resource.id, db, current_user)
 
     await db.refresh(resource)
+
+    await refresh_agent_profiles_for_owner(
+        db=db,
+        current_user=current_user,
+    )
+
     return resource
 
+async def refresh_agent_profiles_for_owner(
+    db: AsyncSession,
+    current_user: User,
+) -> None:
+    """
+    Refresh every active chatbot Agent Profile owned by this customer.
+
+    Resource creation, updates, indexing, deindexing, and deletion must never
+    fail just because automatic profile generation has a temporary AI error.
+    """
+
+    result = await db.execute(
+        select(ApiKey).where(
+            ApiKey.created_by_id == current_user.id,
+            ApiKey.is_active.is_(True),
+        )
+    )
+
+    api_keys = result.scalars().all()
+
+    for api_key in api_keys:
+        try:
+            await generate_agent_profile(
+                api_key=api_key,
+                owner=current_user,
+                db=db,
+                force=False,
+            )
+        except Exception:
+            # The resource itself has already been saved/indexed successfully.
+            # The profile can be regenerated later from the Agent Setup page.
+            continue
 
 async def create_text_resource(
     data: ResourceCreateRequest,
@@ -295,10 +335,16 @@ async def delete_resource(resource_id: int, db: AsyncSession, current_user: User
 
     if resource.filename:
         file_path = RESOURCE_UPLOAD_DIR / resource.filename
+
         if file_path.exists():
             file_path.unlink()
 
     await db.delete(resource)
     await db.commit()
+
+    await refresh_agent_profiles_for_owner(
+        db=db,
+        current_user=current_user,
+    )
 
     return {"message": "Resource deleted successfully"}

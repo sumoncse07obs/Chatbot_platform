@@ -28,8 +28,13 @@ type ChatResponse = {
   visitor?: ChatVisitor | null;
 };
 
+type WidgetConfig = {
+  display_name?: string | null;
+  welcome_message?: string | null;
+  avatar_url?: string | null;
+};
+
 const DEFAULT_VOICE = 'marin';
-const VISITOR_STORAGE_PREFIX = 'botapi_widget_visitor_';
 
 function initialMessage(welcomeMessage?: string | null): ChatMessage {
   return {
@@ -43,16 +48,6 @@ function createVisitorId() {
   return `visitor_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
-function getStoredVisitorId(apiKey: string) {
-  const storageKey = `${VISITOR_STORAGE_PREFIX}${apiKey.slice(-12)}`;
-  const existing = localStorage.getItem(storageKey);
-
-  if (existing) return existing;
-
-  const created = createVisitorId();
-  localStorage.setItem(storageKey, created);
-  return created;
-}
 
 function getSupportedRecordingMimeType() {
   const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
@@ -71,14 +66,14 @@ export default function WidgetChatPage() {
   const externalUserId = useMemo(() => {
     const explicitId = params.get('external_user_id')?.trim();
 
+    // An integration can intentionally provide its own stable customer ID.
     if (explicitId && explicitId !== 'anonymous' && explicitId !== 'demo-user-123') {
       return explicitId;
     }
 
-    if (!apiKey) return createVisitorId();
-
-    return getStoredVisitorId(apiKey);
-  }, [apiKey, params]);
+    // A new ID is generated on every widget page load or browser refresh.
+    return createVisitorId();
+  }, [params]);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -103,6 +98,10 @@ export default function WidgetChatPage() {
   const [welcomeMessage, setWelcomeMessage] = useState<string | null>(null);
   const [visitor, setVisitor] = useState<ChatVisitor | null>(null);
 
+  const [visitorName, setVisitorName] = useState('');
+  const [nameSubmitted, setNameSubmitted] = useState(false);
+  const [widgetConfigLoading, setWidgetConfigLoading] = useState(true);
+
   useEffect(() => {
     return () => {
       stopMicMeter();
@@ -113,6 +112,54 @@ export default function WidgetChatPage() {
     };
   }, []);
 
+    useEffect(() => {
+    let cancelled = false;
+
+    async function loadWidgetConfig() {
+      try {
+        const response = await fetch(
+          `${API_BASE}/chat/widget-config?api_key=${encodeURIComponent(apiKey)}`,
+        );
+
+        const data = (await response.json().catch(() => null)) as WidgetConfig | { detail?: string } | null;
+
+        if (!response.ok) {
+          const detail = data && 'detail' in data ? data.detail : 'Unable to load chatbot';
+          throw new Error(detail || 'Unable to load chatbot');
+        }
+
+        if (cancelled) return;
+
+        const config = data as WidgetConfig;
+        const configuredWelcome = config.welcome_message?.trim() || null;
+
+        setDisplayName(config.display_name?.trim() || 'Chat');
+        setWelcomeMessage(configuredWelcome);
+        setMessages([initialMessage(configuredWelcome)]);
+      } catch (error) {
+        if (cancelled) return;
+
+        setMessages([
+          initialMessage(
+            error instanceof Error
+              ? error.message
+              : 'Unable to load this chatbot.',
+          ),
+        ]);
+      } finally {
+        if (!cancelled) {
+          setWidgetConfigLoading(false);
+        }
+      }
+    }
+
+    void loadWidgetConfig();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey]);
+
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
 
@@ -122,8 +169,21 @@ export default function WidgetChatPage() {
     await sendTextMessage(message);
   }
 
+  function startChat(event: FormEvent) {
+    event.preventDefault();
+
+    const cleanName = visitorName.trim().replace(/\s+/g, ' ');
+
+    if (cleanName.length < 2) {
+      return;
+    }
+
+    setVisitorName(cleanName);
+    setNameSubmitted(true);
+  }
+  
   async function sendTextMessage(message: string) {
-    if (!message || !apiKey || sending) return;
+    if (!message || !apiKey || sending || !nameSubmitted || !visitorName.trim()) return;
 
     setMessages((current) => [...current, { role: 'user', content: message }]);
     setInput('');
@@ -139,6 +199,9 @@ export default function WidgetChatPage() {
           message,
           external_user_id: externalUserId,
           conversation_id: conversationId ? String(conversationId) : null,
+          visitor: {
+            name: visitorName.trim(),
+          },
         }),
       });
 
@@ -418,6 +481,9 @@ export default function WidgetChatPage() {
 
     setConversationId(null);
     setInput('');
+    setVisitor(null);
+    setVisitorName('');
+    setNameSubmitted(false);
     setSpeakingIndex(null);
     setAutoSpeaking(false);
     setMessages([initialMessage(welcomeMessage)]);
@@ -460,7 +526,7 @@ export default function WidgetChatPage() {
           <div className="min-w-0">
             <div className="truncate text-sm font-black">{displayName}</div>
             <div className="text-xs text-white/70">
-              {visitor?.name ? visitor.name : conversationId ? `Chat #${conversationId}` : 'New chat'}
+                            {visitor?.name || (nameSubmitted ? visitorName : '') || (conversationId ? `Chat #${conversationId}` : 'New chat')}
               {autoSpeaking ? ' - Speaking' : ''}
             </div>
           </div>
@@ -477,7 +543,7 @@ export default function WidgetChatPage() {
             Voice
           </label>
 
-          {conversationId && (
+          {nameSubmitted && (
             <button
               type="button"
               onClick={endChat}
@@ -543,7 +609,41 @@ export default function WidgetChatPage() {
         </div>
       )}
 
-      {chatMode === 'text' ? (
+            {!nameSubmitted ? (
+        <form
+          onSubmit={startChat}
+          className="border-t border-slate-200 bg-white p-4"
+        >
+          <div className="mb-2 text-sm font-bold text-slate-800">
+            Before we begin, what name should I use for you?
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              className="min-h-11 flex-1 rounded-full border border-slate-300 px-4 text-sm outline-none focus:border-blue-600"
+              value={visitorName}
+              onChange={(event) => setVisitorName(event.target.value)}
+              placeholder="Enter your name"
+              autoComplete="name"
+              autoFocus
+              disabled={widgetConfigLoading}
+              maxLength={150}
+            />
+
+            <button
+              className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-full bg-blue-600 px-5 text-sm font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              type="submit"
+              disabled={widgetConfigLoading || visitorName.trim().length < 2}
+            >
+              Start
+            </button>
+          </div>
+
+          <p className="mt-2 text-xs text-slate-500">
+            Your name is required to start this chat.
+          </p>
+        </form>
+      ) : chatMode === 'text' ? (
         <form onSubmit={sendMessage} className="bg-white p-3">
           <div className="flex items-center gap-2">
             <button

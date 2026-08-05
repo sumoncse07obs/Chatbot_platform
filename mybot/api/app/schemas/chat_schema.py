@@ -46,3 +46,8 @@ class ChatResponse(BaseModel):
     welcome_message: Optional[str] = None
     visitor: Optional[ChatVisitorResponse] = None
     used_resources: list[ChatResourceMatch] = Field(default_factory=list)
+
+class WidgetConfigResponse(BaseModel):
+    display_name: Optional[str] = None
+    welcome_message: Optional[str] = None
+    avatar_url: Optional[str] = None
