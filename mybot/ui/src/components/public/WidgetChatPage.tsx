@@ -36,10 +36,17 @@ type WidgetConfig = {
 
 const DEFAULT_VOICE = 'marin';
 
-function initialMessage(welcomeMessage?: string | null): ChatMessage {
+function welcomeForVisitor(
+  welcomeMessage: string | null,
+  visitorName: string,
+): ChatMessage {
+  const template =
+    welcomeMessage?.trim() ||
+    'Hi {name} 👋 I’m your AI assistant from TOMA. How can I help you today?';
+
   return {
     role: 'assistant',
-    content: welcomeMessage || 'Hi! How can I help you today?',
+    content: template.replace(/\{name\}/gi, visitorName),
   };
 }
 
@@ -86,7 +93,7 @@ export default function WidgetChatPage() {
 
   const [chatMode, setChatMode] = useState<ChatMode>('text');
   const [conversationId, setConversationId] = useState<number | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([initialMessage()]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -135,7 +142,7 @@ export default function WidgetChatPage() {
 
         setDisplayName(config.display_name?.trim() || 'Chat');
         setWelcomeMessage(configuredWelcome);
-        setMessages([initialMessage(configuredWelcome)]);
+        setMessages([]);
       } catch (error) {
         if (cancelled) return;
 
@@ -180,6 +187,7 @@ export default function WidgetChatPage() {
 
     setVisitorName(cleanName);
     setNameSubmitted(true);
+    setMessages([welcomeForVisitor(welcomeMessage, cleanName)]);
   }
   
   async function sendTextMessage(message: string) {
@@ -486,7 +494,7 @@ export default function WidgetChatPage() {
     setNameSubmitted(false);
     setSpeakingIndex(null);
     setAutoSpeaking(false);
-    setMessages([initialMessage(welcomeMessage)]);
+    setMessages([]);
   }
 
   function changeMode(nextMode: ChatMode) {
