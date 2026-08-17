@@ -128,10 +128,17 @@ export default function WidgetChatPage() {
           `${API_BASE}/chat/widget-config?api_key=${encodeURIComponent(apiKey)}`,
         );
 
-        const data = (await response.json().catch(() => null)) as WidgetConfig | { detail?: string } | null;
+        const data = (await response.json().catch(() => null)) as
+          | WidgetConfig
+          | { detail?: string }
+          | null;
 
         if (!response.ok) {
-          const detail = data && 'detail' in data ? data.detail : 'Unable to load chatbot';
+          const detail =
+            data && 'detail' in data
+              ? data.detail
+              : 'Unable to load chatbot';
+
           throw new Error(detail || 'Unable to load chatbot');
         }
 
@@ -142,16 +149,20 @@ export default function WidgetChatPage() {
 
         setDisplayName(config.display_name?.trim() || 'Chat');
         setWelcomeMessage(configuredWelcome);
+
+        // Do not show the welcome message before the visitor enters a name.
         setMessages([]);
       } catch (error) {
         if (cancelled) return;
 
         setMessages([
-          initialMessage(
-            error instanceof Error
-              ? error.message
-              : 'Unable to load this chatbot.',
-          ),
+          {
+            role: 'assistant',
+            content:
+              error instanceof Error
+                ? error.message
+                : 'Unable to load this chatbot.',
+          },
         ]);
       } finally {
         if (!cancelled) {
@@ -159,9 +170,6 @@ export default function WidgetChatPage() {
         }
       }
     }
-
-    void loadWidgetConfig();
-
     return () => {
       cancelled = true;
     };
