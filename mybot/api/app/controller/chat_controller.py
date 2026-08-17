@@ -524,22 +524,22 @@ async def resolve_conversation(
         try:
             conversation_id = int(data.conversation_id)
         except (TypeError, ValueError):
-            conversation_id = 0
+            raise HTTPException(status_code=400, detail="Invalid conversation ID")
 
-        if conversation_id > 0:
-            result = await db.execute(
-                select(ChatConversation).where(
-                    ChatConversation.id == conversation_id,
-                    ChatConversation.api_key_id == api_key.id,
-                    ChatConversation.created_by_id == owner.id,
-                )
+        result = await db.execute(
+            select(ChatConversation).where(
+                ChatConversation.id == conversation_id,
+                ChatConversation.api_key_id == api_key.id,
+                ChatConversation.created_by_id == owner.id,
+                ChatConversation.visitor_id == visitor.id,
             )
-            conversation = result.scalar_one_or_none()
+        )
+        conversation = result.scalar_one_or_none()
 
-            if conversation:
-                if conversation.visitor_id is None:
-                    conversation.visitor_id = visitor.id
-                return conversation
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        return conversation
 
     conversation = ChatConversation(
         api_key_id=api_key.id,
@@ -554,7 +554,6 @@ async def resolve_conversation(
     await db.flush()
 
     return conversation
-
 
 async def load_recent_messages(conversation_id: int, db: AsyncSession, limit: int = 8) -> list[dict]:
     result = await db.execute(
@@ -633,8 +632,6 @@ async def persist_assistant_answer(
         "display_name": api_key.display_name,
         "avatar_url": api_key.avatar_url,
         "welcome_message": api_key.welcome_message,
-        "visitor": serialize_visitor(visitor),
-        "used_resources": matches,
     }
 
 

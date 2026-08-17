@@ -1,14 +1,14 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: EmailStr
-    password: str
+    password: str = Field(min_length=6, max_length=128)
     phone: Optional[str] = None
 
 
@@ -18,11 +18,11 @@ class LoginRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    new_password: str
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 class AdminChangePasswordRequest(BaseModel):
-    new_password: str
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 class AdminChangeRoleRequest(BaseModel):
@@ -107,6 +107,6 @@ class AdminUserCreateRequest(BaseModel):
     last_name: Optional[str] = None
     email: EmailStr
     phone: Optional[str] = None
-    password: str
+    password: str = Field(min_length=6, max_length=128)
     role: str = "user"
     is_active: bool = True

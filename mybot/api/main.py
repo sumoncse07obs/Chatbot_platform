@@ -27,7 +27,7 @@ app = FastAPI(
 setup_cors(app)
 
 app.mount("/uploads", StaticFiles(directory="storage/uploads"), name="uploads")
-app.mount("/resource-files", StaticFiles(directory="storage/resources"), name="resource-files")
+#app.mount("/resource-files", StaticFiles(directory="storage/resources"), name="resource-files")
 
 app.include_router(auth_router)
 app.include_router(admin_router)

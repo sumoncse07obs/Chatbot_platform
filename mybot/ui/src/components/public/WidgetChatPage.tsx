@@ -626,7 +626,6 @@ export default function WidgetChatPage() {
               placeholder="Enter your name"
               autoComplete="name"
               autoFocus
-              disabled={widgetConfigLoading}
               maxLength={150}
             />
 
