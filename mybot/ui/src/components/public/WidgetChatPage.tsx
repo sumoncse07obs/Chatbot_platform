@@ -150,8 +150,6 @@ export default function WidgetChatPage() {
         setDisplayName(config.display_name?.trim() || 'Chat');
         setWelcomeMessage(configuredWelcome);
 
-        // Do not show the welcome message before the visitor enters a name.
-        setMessages([]);
       } catch (error) {
         if (cancelled) return;
 
@@ -648,7 +646,7 @@ export default function WidgetChatPage() {
             <button
               className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-full bg-blue-600 px-5 text-sm font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               type="submit"
-              disabled={widgetConfigLoading || visitorName.trim().length < 2}
+              disabled={visitorName.trim().length < 2}
             >
               Start
             </button>
