@@ -28,6 +28,7 @@ class Settings(BaseSettings):
         return (
             f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+            f"?ssl={self.DB_SSLMODE}"
         )
 
     class Config:
