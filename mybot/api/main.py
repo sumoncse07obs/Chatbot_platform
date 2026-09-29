@@ -15,9 +15,6 @@ from app.settings.cors import setup_cors
 from route.vapi_route import router as vapi_router
 from route.agent_profile_route import router as agent_profile_router
 
-#app = FastAPI(title="BotAPI")
-
-
 app = FastAPI(
     title="BotAPI",
     docs_url="/docs",

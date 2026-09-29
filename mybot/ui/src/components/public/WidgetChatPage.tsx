@@ -35,6 +35,8 @@ type WidgetConfig = {
 };
 
 const DEFAULT_VOICE = 'marin';
+const VOICE_ACTIVITY_RMS_THRESHOLD = 0.018;
+const AUTO_SEND_SILENCE_MS = 1200;
 
 function welcomeForVisitor(
   welcomeMessage: string | null,
@@ -90,6 +92,8 @@ export default function WidgetChatPage() {
   const animationFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingMimeTypeRef = useRef('audio/webm');
+const silenceStartedAtRef = useRef<number | null>(null);
+const hasDetectedSpeechRef = useRef(false);
 
   const [chatMode, setChatMode] = useState<ChatMode>('text');
   const [conversationId, setConversationId] = useState<number | null>(null);
@@ -263,7 +267,10 @@ export default function WidgetChatPage() {
 
   function startMicMeter(stream: MediaStream) {
     const AudioContextClass =
-      window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      window.AudioContext ||
+      (window as typeof window & {
+        webkitAudioContext?: typeof AudioContext;
+      }).webkitAudioContext;
 
     if (!AudioContextClass) return;
 
@@ -292,6 +299,20 @@ export default function WidgetChatPage() {
       const rms = Math.sqrt(sum / dataArray.length);
       setMicLevel(Math.min(100, Math.round(rms * 260)));
 
+      const now = window.performance.now();
+
+      if (rms >= VOICE_ACTIVITY_RMS_THRESHOLD) {
+        hasDetectedSpeechRef.current = true;
+        silenceStartedAtRef.current = null;
+      } else if (hasDetectedSpeechRef.current) {
+        if (silenceStartedAtRef.current === null) {
+          silenceStartedAtRef.current = now;
+        } else if (now - silenceStartedAtRef.current >= AUTO_SEND_SILENCE_MS) {
+          stopRecording();
+          return;
+        }
+      }
+
       animationFrameRef.current = window.requestAnimationFrame(tick);
     };
 
@@ -316,6 +337,15 @@ export default function WidgetChatPage() {
   async function startRecording() {
     if (!navigator.mediaDevices?.getUserMedia || recording || transcribing) return;
 
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+
+    setSpeakingIndex(null);
+    setAutoSpeaking(false);
+
     const mimeType = getSupportedRecordingMimeType();
 
     if (!mimeType) {
@@ -336,6 +366,8 @@ export default function WidgetChatPage() {
       recordingMimeTypeRef.current = mimeType;
       streamRef.current = stream;
       audioChunksRef.current = [];
+      hasDetectedSpeechRef.current = false;
+      silenceStartedAtRef.current = null;
       mediaRecorderRef.current = recorder;
 
       startMicMeter(stream);
@@ -364,9 +396,14 @@ export default function WidgetChatPage() {
   }
 
   function stopRecording() {
-    if (!recording) return;
+    const recorder = mediaRecorderRef.current;
 
-    mediaRecorderRef.current?.stop();
+    if (!recorder || recorder.state === 'inactive') return;
+
+    silenceStartedAtRef.current = null;
+    hasDetectedSpeechRef.current = false;
+
+    recorder.stop();
     setRecording(false);
     stopMicMeter();
 
@@ -665,7 +702,7 @@ export default function WidgetChatPage() {
               }`}
               type="button"
               onClick={recording ? stopRecording : startRecording}
-              disabled={sending || transcribing || autoSpeaking}
+              disabled={sending || transcribing}
               aria-label={recording ? 'Stop recording' : 'Start voice input'}
               title={recording ? 'Stop recording' : 'Voice input'}
             >
