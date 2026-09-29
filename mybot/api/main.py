@@ -17,11 +17,12 @@ from route.agent_profile_route import router as agent_profile_router
 
 #app = FastAPI(title="BotAPI")
 
+
 app = FastAPI(
-   title="BotAPI",
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    title="BotAPI",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 setup_cors(app)
