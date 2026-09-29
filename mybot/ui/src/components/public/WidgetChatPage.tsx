@@ -481,11 +481,17 @@ const hasDetectedSpeechRef = useRef(false);
 
       audioRef.current = audio;
 
-      audio.onended = () => {
+      const resumeVoiceConversation = () => {
         URL.revokeObjectURL(url);
         setSpeakingIndex(null);
         setAutoSpeaking(false);
+
+        if (chatMode === 'voice' && nameSubmitted) {
+          void startRecording();
+        }
       };
+
+      audio.onended = resumeVoiceConversation;
 
       audio.onerror = () => {
         URL.revokeObjectURL(url);
